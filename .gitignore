@@ -1,0 +1,36 @@
+# Secrets -- NEVER commit
+.env
+
+# LLM run artifacts (15MB+, generated outputs -- not source code)
+artifacts/
+
+# Large binary inputs
+*.pdf
+
+# Loose output files at project root (test runs, one-off outputs)
+out*.json
+interp*.json
+
+# Personal analysis / internal notes -- not for public repo
+compliance_understanding.md
+more_understandingonproject.md
+agent.md
+SEC_REGULATORY_INTERPRETER_DEV_GUIDE.md
+docs/Concept_note.md
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+pytest-cache-files-*/
+
+# Claude Code session files (session history, memory -- not project code)
+.claude/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

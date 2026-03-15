@@ -1,0 +1,46 @@
+﻿{
+  "firm": {
+    "entity_type": "RIA",
+    "activities": ["investment advisory", "marketing", "client onboarding"],
+    "products": ["managed accounts", "model portfolios"],
+    "jurisdictions": ["US"],
+    "notes": "Firm posts performance highlights on website and LinkedIn, and uses testimonials in pitch decks."
+  },
+  "scenario": {
+    "topic": "SEC Marketing Rule",
+    "description": "The firm wants to publish a website page and a LinkedIn post that includes (1) a client testimonial, (2) a claim 'top quartile returns', and (3) a 1-year performance chart. The content will be used for prospecting.",
+    "timeframe_months": 12,
+    "mode": "baseline"
+  },
+  "sources": [
+    {
+      "title": "Marketing Rule, general anti-fraud standard",
+      "source_type": "rule",
+      "locator": "17 CFR 275.206(4)-1 (general prohibitions)",
+      "url": "https://example.test/marketing-rule",
+      "excerpt": "An advertisement may not include any untrue statement of a material fact, or omit a material fact necessary to make the statement not misleading."
+    },
+    {
+      "title": "Testimonials and endorsements disclosure concept",
+      "source_type": "guidance",
+      "locator": "Marketing Rule (testimonials and endorsements conditions)",
+      "url": "https://example.test/testimonials",
+      "excerpt": "Certain testimonials and endorsements are permitted, subject to conditions including disclosures about compensation, conflicts of interest, and whether the person is a client."
+    },
+    {
+      "title": "Performance advertising, fair and balanced presentation concept",
+      "source_type": "guidance",
+      "locator": "Marketing Rule (performance information)",
+      "url": "https://example.test/performance",
+      "excerpt": "Performance results should be presented in a manner that is fair and balanced and not materially misleading in light of the circumstances."
+    },
+    {
+      "title": "Substantiation expectation concept",
+      "source_type": "guidance",
+      "locator": "Marketing Rule (substantiation)",
+      "url": "https://example.test/substantiation",
+      "excerpt": "The adviser should have a reasonable basis for believing it will be able to substantiate material statements of fact in an advertisement upon demand."
+    }
+  ],
+  "strict_citations": true
+}

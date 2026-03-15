@@ -1,0 +1,53 @@
+﻿{
+  "firm": {
+    "entity_type": "RIA",
+    "activities": [
+      "investment advisory",
+      "marketing"
+    ],
+    "products": [
+      "managed accounts"
+    ],
+    "jurisdictions": [
+      "US"
+    ],
+    "notes": "Firm markets performance to prospective clients"
+  },
+  "scenario": {
+    "topic": "SEC Marketing Rule",
+    "description": "The firm wants to publish a new performance advertisement with testimonials.",
+    "timeframe_months": 12,
+    "mode": "baseline"
+  },
+  "sources": [
+    {
+      "title": "Investment Adviser Marketing Rule Overview",
+      "source_type": "sec_release",
+      "locator": "17 CFR 275.206(4)-1",
+      "url": "https://example.test/sec-marketing-rule-overview",
+      "excerpt": "Advertisements should not include untrue statements of material fact."
+    },
+    {
+      "title": "Testimonials and Endorsements Conditions",
+      "source_type": "sec_faq",
+      "locator": "FAQ 2023-01",
+      "url": "https://example.test/sec-marketing-faq",
+      "excerpt": "Certain disclosures are expected when using testimonials or endorsements."
+    },
+    {
+      "title": "Books and Records for Advertisements",
+      "source_type": "rule",
+      "locator": "17 CFR 275.204-2",
+      "url": "https://example.test/sec-books-records",
+      "excerpt": "Advisers are expected to keep records supporting performance-related claims."
+    },
+    {
+      "title": "RIA Internal Supervisory Notes",
+      "source_type": "internal_policy",
+      "locator": "Policy Section 4.2",
+      "url": null,
+      "excerpt": "All public marketing content should go through compliance pre-review."
+    }
+  ],
+  "strict_citations": true
+}
