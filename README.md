@@ -201,7 +201,30 @@ Concretely:
 - **Verification on a second rule:** all calibration so far is on one document. Need to
   confirm the pipeline generalises before drawing conclusions about quality.
 
+### The intelligence problem we are solving
+
+SEC regulatory releases follow a consistent 3-part structure within every topic section:
+
+```
+A. Some Rule Topic
+    a. Proposed Amendments    <- what the SEC originally proposed
+    b. Comments               <- industry letters raising edge cases and objections
+    c. Final Amendments       <- what the SEC actually decided (the operative rule text)
+```
+
+This means the comments and commentary chunks -- which we currently filter out before
+extraction -- contain exactly the legal reasoning that makes an interpretation useful:
+what ambiguous scenarios industry raised, and how the SEC said it would apply the rule.
+
+The next step is to use the `heading_path` field already present on every chunk to
+group chunks by their parent section. For each obligation, we pull the full "section
+family" -- proposed text, industry comments, SEC responses, and final rule -- and feed
+that as context to the interpretation LLM. This replaces keyword search with a
+structurally grounded legal context package, so interpretations are based on how the
+rule was actually debated and decided, not just what the final text says.
+
 ### What comes next
+- Section-family context builder: group chunks by heading_path to link comment/response pairs
 - Gap analysis layer: given a company description, map obligations to operational gaps
 - Multi-rule comparison: surface conflicts and overlaps across related releases
 - Structured output for downstream use (API, dashboard integration)
