@@ -178,6 +178,36 @@ Test files:
 
 ---
 
+## Status & Roadmap
+
+### What is done
+- Full pipeline operational: ingest -> classify -> extract -> interpret -> report
+- Document segmentation, chunk scoring, and content-type filtering (no LLM at ingest)
+- Structured extraction with Pydantic validation and citation tracing
+- Per-obligation interpretation with live CFR lookups and commentary search
+- Markdown report generation
+- 55 passing tests
+- Verified end-to-end on SEC Release 33-11216 (Cybersecurity Disclosure Rule)
+
+### What we are working on now
+The infrastructure is in place. The current focus is intelligence quality -- making the
+output actually useful for a compliance team, not just structurally valid.
+
+Concretely:
+- **Obligation completeness:** the extractor currently finds 3-4 of 6+ obligations in a
+  typical release. Improving recall without flooding the context window.
+- **Interpretation depth:** per-obligation interpretations need to be specific enough that
+  a compliance officer can act on them, not just restate the rule text.
+- **Verification on a second rule:** all calibration so far is on one document. Need to
+  confirm the pipeline generalises before drawing conclusions about quality.
+
+### What comes next
+- Gap analysis layer: given a company description, map obligations to operational gaps
+- Multi-rule comparison: surface conflicts and overlaps across related releases
+- Structured output for downstream use (API, dashboard integration)
+
+---
+
 ## Architecture
 
 See `SYSTEM_OVERVIEW.md` for the full pipeline diagram, module table, schema hierarchy,
