@@ -23,15 +23,14 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from langchain_core.messages import HumanMessage
 
-from .prompts import build_interpretation_prompt, build_reference_judge_prompt
-from .schemas import InterpretationOutput, ObligationInterpretation
+from .prompts import build_interpretation_prompt, build_reference_judge_prompt, build_context_linker_prompt
+from .schemas import BinPassOutput, InterpretationOutput, ObligationInterpretation, ObligationContextLinks
 from .tools import (
     detect_ambiguous_terms,
     extract_references_from_text,
     fetch_cfr,
     get_surrounding_context,
     lookup_definition,
-    search_document,
 )
 from .utils import get_logger, parse_json_object
 
@@ -69,6 +68,16 @@ def run_interpret_pipeline(
         run_id, rule_title, len(obligations),
     )
 
+    # Load bin findings if available (pre-linked context per obligation)
+    bin_findings = []
+    bin_findings_path = os.path.join(artifact_dir, "bin_findings.json")
+    if os.path.exists(bin_findings_path):
+        with open(bin_findings_path, encoding="utf-8") as f:
+            bin_data = json.load(f)
+        bin_output = BinPassOutput.model_validate(bin_data)
+        bin_findings = bin_output.findings
+        logger.info("Interpret: loaded %d bin findings", len(bin_findings))
+
     interpretations: List[ObligationInterpretation] = []
 
     for obl in obligations:
@@ -76,6 +85,18 @@ def run_interpret_pipeline(
         logger.info("  Processing %s: %s", obl_id, obl.get("obligation_text", "")[:60])
 
         context_bundle = _build_initial_context(obl, artifact_dir, logger)
+
+        # Use pre-linked bin findings for discussion context
+        obl_findings = [
+            f for f in bin_findings
+            if obl_id in f.related_to and f.finding_type != "not_relevant"
+        ]
+        if obl_findings:
+            context_bundle["discussion"] = [
+                f"[{f.finding_type}] {f.text}" for f in obl_findings
+            ]
+            logger.info("    bin findings: %d passages for %s", len(obl_findings), obl_id)
+
         context_bundle = _resolve_references(obl, context_bundle, cheap_llm, logger)
         interpretation = _interpret_obligation(obl, context_bundle, llm, logger)
         interpretations.append(interpretation)
@@ -115,35 +136,83 @@ def _build_initial_context(obl: dict, artifact_dir: str, logger: logging.Logger)
             logger.debug("    no definition found for %r", term)
 
     # Get surrounding context using source_citations -> section_id
-    # source_citations are src:N chunk IDs; we need the section_id
-    # Load chunks.json to map src_id -> section_id
     surrounding = []
     section_id = _get_section_id_for_obligation(obl, artifact_dir)
     if section_id:
         surrounding = get_surrounding_context(section_id, artifact_dir, window=2)
         logger.debug("    surrounding context: %d sections", len(surrounding))
 
-    # Search commentary/comments for operational guidance on this obligation
-    query = obligation_text + " " + " ".join(terms)
-    discussion = search_document(
-        query,
-        artifact_dir,
-        content_types=["commentary", "comments"],
-        top_n=3,
-        prefer_examples=True,
-    )
     logger.info(
-        "    initial context: %d definitions, %d surrounding sections, %d discussion passages",
-        len(definitions), len(surrounding), len(discussion),
+        "    initial context: %d definitions, %d surrounding sections",
+        len(definitions), len(surrounding),
     )
 
     return {
         "definitions": definitions,
         "surrounding": surrounding,
-        "discussion": discussion,
-        "cfr_texts": {},          # filled by resolve_references
-        "fetched_refs": set(),    # track what we've already fetched
+        "discussion": [],      # filled by bin findings lookup in per-obligation loop
+        "cfr_texts": {},       # filled by resolve_references
+        "fetched_refs": set(), # track what we've already fetched
     }
+
+
+def _format_family_chunks(chunks: List[dict]) -> List[str]:
+    """Format raw family chunk dicts into '[heading]\\ntext' strings for LLM prompts."""
+    return [f"[{c.get('heading', '')}]\n{c.get('text', '')[:2000]}" for c in chunks]
+
+
+def _link_family_context(
+    obl: dict,
+    family_chunks: List[dict],
+    cheap_llm: Any,
+    logger: logging.Logger,
+) -> List[dict]:
+    """
+    Linker pass: ask cheap LLM to classify each family chunk as key | supporting | skip
+    for this obligation. Returns filtered list (key + supporting only).
+
+    Fallback: returns all chunks unchanged on LLM failure or empty keep set.
+    """
+    if not family_chunks:
+        return []
+
+    obl_id = obl.get("obligation_id", "?")
+    obl_text = obl.get("obligation_text", "")
+    prompt = build_context_linker_prompt(obl_text, obl_id, family_chunks)
+
+    try:
+        response = cheap_llm.invoke([HumanMessage(content=prompt)])
+        raw = response.content if hasattr(response, "content") else str(response)
+        parsed = parse_json_object(raw)
+        links = ObligationContextLinks.model_validate(parsed)
+
+        keep_indices = set(links.key_indices + links.supporting_indices)
+        # Clamp to valid range
+        n = len(family_chunks)
+        keep_indices = {i for i in keep_indices if 0 <= i < n}
+
+        if not keep_indices:
+            logger.warning(
+                "    linker: all indices out of range for %s -- using all %d chunks",
+                obl_id, n,
+            )
+            return family_chunks
+
+        result = [family_chunks[i] for i in sorted(keep_indices)]
+        logger.info(
+            "    linker: %s  input=%d  key=%d  supporting=%d  skip=%d  kept=%d",
+            obl_id, n,
+            len(links.key_indices), len(links.supporting_indices),
+            len(links.skip_indices), len(result),
+        )
+        return result
+
+    except Exception as e:
+        logger.warning(
+            "    linker: failed for %s: %s -- using all %d chunks as fallback",
+            obl_id, e, len(family_chunks),
+        )
+        return family_chunks
 
 
 def _get_section_id_for_obligation(obl: dict, artifact_dir: str) -> Optional[str]:

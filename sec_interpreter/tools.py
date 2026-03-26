@@ -3,10 +3,11 @@ sec_interpreter/tools.py
 
 Non-LLM tool functions used by the interpretation pipeline.
 
-- lookup_definition      : search classified definition sections in the document
-- get_surrounding_context: pull sections adjacent to an obligation's section
-- search_document        : keyword search across commentary/comments sections
-- fetch_cfr              : fetch live CFR text from the eCFR public API
+- lookup_definition         : search classified definition sections in the document
+- get_surrounding_context   : pull sections adjacent to an obligation's section
+- get_section_family_chunks : structural lookup -- all commentary/comments in same heading family
+- search_document           : keyword search across commentary/comments (fallback)
+- fetch_cfr                 : fetch live CFR text from the eCFR public API
 """
 from __future__ import annotations
 
@@ -138,6 +139,70 @@ _STOPWORDS: Set[str] = {
     "as", "was", "were", "has", "have", "had", "not", "but", "if", "any",
     "all", "such", "other", "under", "also", "must", "shall", "may",
 }
+
+
+def get_section_family_chunks(
+    section_id: str,
+    artifact_dir: str,
+    subsection_roles: List[str] = None,
+) -> List[dict]:
+    """
+    Return dict records for all chunks in the same section family as the given
+    section_id, filtered to the requested subsection_roles.
+
+    Uses section_family and subsection_role fields on RichChunk -- both set at
+    ingest time from heading_path, no classify stage required.
+
+    subsection_roles defaults to ["comments", "final"], which covers industry
+    edge-case Q&A and SEC reasoning -- the primary interpretation context.
+
+    Each returned dict has keys: src_id, subsection_role, heading, text.
+    Falls back to empty list if chunks.json is missing or chunks predate this field.
+    """
+    if subsection_roles is None:
+        subsection_roles = ["comments", "final"]
+
+    chunks_path = os.path.join(artifact_dir, "chunks.json")
+    if not os.path.exists(chunks_path):
+        logger.debug("get_section_family_chunks: no chunks.json in %s", artifact_dir)
+        return []
+
+    with open(chunks_path, encoding="utf-8") as f:
+        raw_chunks = json.load(f)
+
+    # Find the section_family for the given section_id
+    family = ""
+    for c in raw_chunks:
+        if c.get("section_id") == section_id:
+            family = c.get("section_family", "")
+            break
+
+    if not family:
+        logger.debug(
+            "get_section_family_chunks: section_id=%r not found or has no section_family",
+            section_id,
+        )
+        return []
+
+    role_set = set(subsection_roles)
+    results = []
+    for c in raw_chunks:
+        if c.get("section_family") != family:
+            continue
+        if c.get("subsection_role") not in role_set:
+            continue
+        results.append({
+            "src_id": c.get("src_id", ""),
+            "subsection_role": c.get("subsection_role", ""),
+            "heading": " > ".join(c.get("heading_path", [])),
+            "text": c.get("text", ""),
+        })
+
+    logger.debug(
+        "get_section_family_chunks: family=%r  roles=%s  matched=%d chunks",
+        family, subsection_roles, len(results),
+    )
+    return results
 
 
 def search_document(

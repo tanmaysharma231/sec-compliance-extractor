@@ -253,6 +253,20 @@ def build_ingest_graph():
 # Section chunking helpers
 # ---------------------------------------------------------------------------
 
+def _derive_subsection_role(heading_path: list) -> str:
+    """Derive subsection role from heading_path[2] naming patterns."""
+    if len(heading_path) < 3:
+        return "other"
+    level3 = heading_path[2].lower()
+    if "proposed" in level3:
+        return "proposed"
+    if "comment" in level3:
+        return "comments"
+    if "final" in level3:
+        return "final"
+    return "other"
+
+
 def _chunk_section(
     section: Section,
     start_global_idx: int,
@@ -292,6 +306,8 @@ def _chunk_section(
             text=full_text,
             char_len=len(full_text),
             token_estimate=len(full_text) // 4,
+            section_family=section.heading_path[1] if len(section.heading_path) >= 2 else "",
+            subsection_role=_derive_subsection_role(section.heading_path),
         )
         chunk_idx_in_sec += 1
         return chunk

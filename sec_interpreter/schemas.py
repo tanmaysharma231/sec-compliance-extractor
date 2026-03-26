@@ -79,6 +79,7 @@ class KeyObligation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     obligation_id: str
+    rule_provision: Optional[str] = None   # e.g. "17 CFR 229.106(b)" / "Item 1.05 Form 8-K"
     obligation_text: str
     trigger: Optional[str] = None
     deadline: Optional[str] = None
@@ -187,6 +188,8 @@ class RichChunk(BaseModel):
     has_codified_text: bool = False
     has_example: bool = False        # set by scorer; True if chunk contains worked examples/scenarios
     content_type: str = ""           # set by classify step; empty means not yet classified
+    section_family: str = ""         # heading_path[1] if it exists -- the obligation-level section (e.g. "A. Disclosure...")
+    subsection_role: str = ""        # "proposed" | "comments" | "final" | "other" -- derived from heading_path[2]
 
 
 class LocatorSelection(BaseModel):
@@ -246,6 +249,17 @@ class ObligationInterpretation(BaseModel):
     confidence_level: Literal["high", "medium", "low"] = "medium"
 
 
+class ObligationContextLinks(BaseModel):
+    """Output of the context linker pass for one obligation.
+    Chunk indices are 0-based into the list from get_section_family_chunks.
+    """
+    model_config = ConfigDict(extra="ignore")  # cheap LLM may add fields
+
+    key_indices: List[int] = Field(default_factory=list)
+    supporting_indices: List[int] = Field(default_factory=list)
+    skip_indices: List[int] = Field(default_factory=list)
+
+
 class InterpretationOutput(BaseModel):
     """Full interpretation run output -- one ObligationInterpretation per obligation."""
     model_config = ConfigDict(extra="forbid")
@@ -253,6 +267,74 @@ class InterpretationOutput(BaseModel):
     run_id: str
     rule_title: str
     interpretations: List[ObligationInterpretation] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Bin pass models (BinGraph)
+# ---------------------------------------------------------------------------
+
+VALID_BIN_TYPES = {
+    "missed_obligation",
+    "scope_modifier",
+    "implied_requirement",
+    "definition",
+    "edge_case",
+    "not_relevant",
+}
+
+
+class BinFinding(BaseModel):
+    """One finding from the bin pass -- a chunk classified and tagged to obligations."""
+    model_config = ConfigDict(extra="ignore")  # cheap LLM may add fields
+
+    finding_type: str                          # one of VALID_BIN_TYPES
+    text: str                                  # relevant excerpt from chunk
+    related_to: List[str] = Field(default_factory=list)   # obligation IDs e.g. ["OBL-001"]
+    source_chunks: List[str] = Field(default_factory=list) # src:N references
+    notes: Optional[str] = None               # LLM reasoning
+
+    @field_validator("finding_type")
+    @classmethod
+    def validate_finding_type(cls, value: str) -> str:
+        if value not in VALID_BIN_TYPES:
+            raise ValueError(
+                f"finding_type must be one of: {', '.join(sorted(VALID_BIN_TYPES))}. Got: {value!r}"
+            )
+        return value
+
+
+class BinPassOutput(BaseModel):
+    """Full output of one bin pass run."""
+    model_config = ConfigDict(extra="ignore")
+
+    run_id: str
+    findings: List[BinFinding] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Structure scan models (StructureGraph)
+# ---------------------------------------------------------------------------
+
+class ObligationSection(BaseModel):
+    """One lettered obligation section identified by structure scan."""
+    model_config = ConfigDict(extra="forbid")
+
+    section_letter: str                        # "A", "B", "C"...
+    heading: str                               # full heading text
+    section_id: str                            # e.g. "SEC-012"
+    cfr_citations: List[str] = Field(default_factory=list)  # CFR cites found in section
+    structured_chunk_ids: List[str] = Field(default_factory=list)  # src:N ids
+
+
+class StructureScanResult(BaseModel):
+    """Output of structure_scan() -- maps document structure to extraction targets."""
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    obligation_sections: List[ObligationSection] = Field(default_factory=list)
+    named_section_chunk_ids: List[str] = Field(default_factory=list)  # dates, scope, exemptions
+    expected_obligation_count: int = 0         # upper bound from heading count
+    structured_chunk_ids: List[str] = Field(default_factory=list)  # all chunks for extractor
 
 
 class DocumentMap(BaseModel):

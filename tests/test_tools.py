@@ -9,6 +9,7 @@ import pytest
 from sec_interpreter.tools import (
     detect_ambiguous_terms,
     extract_references_from_text,
+    get_section_family_chunks,
     get_surrounding_context,
     lookup_definition,
 )
@@ -219,3 +220,78 @@ def test_surrounding_context_returns_empty_when_file_missing() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         result = get_surrounding_context("SEC-001", tmp)
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# get_section_family_chunks -- returns List[dict]
+# ---------------------------------------------------------------------------
+
+def _make_chunks_json(tmp_dir: str, chunks: list) -> None:
+    with open(os.path.join(tmp_dir, "chunks.json"), "w", encoding="utf-8") as f:
+        json.dump(chunks, f)
+
+
+def test_family_chunks_returns_list_of_dicts() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_chunks_json(tmp, [
+            {
+                "src_id": "src:0",
+                "section_id": "SEC-001",
+                "heading_path": ["II.", "A.", "2. Comments"],
+                "section_family": "A.",
+                "subsection_role": "comments",
+                "text": "Some commenter text.",
+            },
+        ])
+        result = get_section_family_chunks("SEC-001", tmp)
+        assert isinstance(result, list)
+        assert len(result) == 1
+        item = result[0]
+        assert "src_id" in item
+        assert "subsection_role" in item
+        assert "heading" in item
+        assert "text" in item
+        assert item["src_id"] == "src:0"
+        assert item["subsection_role"] == "comments"
+
+
+def test_family_chunks_returns_empty_for_missing_section_id() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_chunks_json(tmp, [
+            {
+                "src_id": "src:0",
+                "section_id": "SEC-001",
+                "heading_path": ["II.", "A."],
+                "section_family": "A.",
+                "subsection_role": "comments",
+                "text": "text",
+            },
+        ])
+        result = get_section_family_chunks("SEC-999", tmp)
+        assert result == []
+
+
+def test_family_chunks_filters_by_subsection_role() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        _make_chunks_json(tmp, [
+            {
+                "src_id": "src:0",
+                "section_id": "SEC-001",
+                "heading_path": ["II.", "A.", "1. Proposed"],
+                "section_family": "A.",
+                "subsection_role": "proposed",
+                "text": "Proposed text.",
+            },
+            {
+                "src_id": "src:1",
+                "section_id": "SEC-002",
+                "heading_path": ["II.", "A.", "2. Comments"],
+                "section_family": "A.",
+                "subsection_role": "comments",
+                "text": "Comments text.",
+            },
+        ])
+        # Default roles = ["comments", "final"] -- should skip "proposed"
+        result = get_section_family_chunks("SEC-001", tmp)
+        assert len(result) == 1
+        assert result[0]["src_id"] == "src:1"

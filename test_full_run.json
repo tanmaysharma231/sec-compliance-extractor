@@ -1,0 +1,207 @@
+{
+  "rule_metadata": {
+    "rule_title": "Cybersecurity Risk Management, Strategy, Governance, and Incident Disclosure",
+    "release_number": "33-11216; 34-97989",
+    "publication_date": null,
+    "effective_date": "2023-09-05",
+    "citations": [
+      "src:0"
+    ]
+  },
+  "rule_summary": {
+    "summary": "The SEC has implemented new rules to standardize disclosures on cybersecurity risk management, strategy, and incidents for public companies. These rules require current disclosures of material cybersecurity incidents and periodic disclosures regarding risk management processes, board oversight, and governance, all of which must be presented in Inline XBRL. The rules are effective September 5, 2023, with compliance required from December 15, 2023, for certain disclosures and other specified dates for smaller reporting companies.",
+    "citations": [
+      "src:0",
+      "src:78"
+    ]
+  },
+  "key_obligations": [
+    {
+      "obligation_id": "OBL-001",
+      "rule_provision": "Form 8-K Item 1.05",
+      "obligation_text": "Registrants must file Form 8-K disclosing a material cybersecurity incident within 4 business days of determining it is material.",
+      "trigger": "Incident determined material",
+      "deadline": "4 business days",
+      "disclosure_fields": [
+        "nature of incident",
+        "scope",
+        "timing",
+        "material impact"
+      ],
+      "evidence": [
+        "Form 8-K filing"
+      ],
+      "cited_sections": [
+        "Form 8-K Item 1.05"
+      ],
+      "source_citations": [
+        "src:20"
+      ]
+    },
+    {
+      "obligation_id": "OBL-002",
+      "rule_provision": "Form 8-K Item 1.05",
+      "obligation_text": "Registrants must describe in Form 8-K the material aspects of the nature, scope, and timing of a cybersecurity incident and its impact on the registrant.",
+      "trigger": "Incident determined material",
+      "deadline": null,
+      "disclosure_fields": [
+        "nature of incident",
+        "scope",
+        "timing",
+        "material impact"
+      ],
+      "evidence": [
+        "Form 8-K filing"
+      ],
+      "cited_sections": [
+        "Form 8-K Item 1.05"
+      ],
+      "source_citations": [
+        "src:18",
+        "src:19"
+      ]
+    },
+    {
+      "obligation_id": "OBL-003",
+      "rule_provision": "Form 8-K Item 1.05 Instruction 2",
+      "obligation_text": "Registrants must file a Form 8-K amendment within four business days of determining any previously unavailable information about a disclosed cybersecurity incident.",
+      "trigger": "Information becomes available",
+      "deadline": "4 business days",
+      "disclosure_fields": [],
+      "evidence": [
+        "Form 8-K amendment"
+      ],
+      "cited_sections": [
+        "Form 8-K Item 1.05"
+      ],
+      "source_citations": [
+        "src:33",
+        "src:34"
+      ]
+    },
+    {
+      "obligation_id": "OBL-004",
+      "rule_provision": "Form 8-K Item 1.05",
+      "obligation_text": "Registrants must delay Form 8-K filing if the Attorney General determines that disclosure poses a substantial risk to national security or public safety.",
+      "trigger": "Attorney General's determination",
+      "deadline": "up to 120 days",
+      "disclosure_fields": [],
+      "evidence": [
+        "Attorney General's written notification"
+      ],
+      "cited_sections": [
+        "Form 8-K Item 1.05"
+      ],
+      "source_citations": [
+        "src:23",
+        "src:22"
+      ]
+    },
+    {
+      "obligation_id": "OBL-005",
+      "rule_provision": "Form 8-K Item 1.05",
+      "obligation_text": "Registrants subject to the FCC's CPNI rule may delay Form 8-K disclosure up to seven business days following notification to the USSS and FBI.",
+      "trigger": "Notification to USSS and FBI",
+      "deadline": "7 business days",
+      "disclosure_fields": [],
+      "evidence": [
+        "Notification correspondence",
+        "Form 8-K filing"
+      ],
+      "cited_sections": [
+        "Form 8-K Item 1.05"
+      ],
+      "source_citations": [
+        "src:27"
+      ]
+    },
+    {
+      "obligation_id": "OBL-006",
+      "rule_provision": "Item 106 of Regulation S-K",
+      "obligation_text": "All registrants must provide cybersecurity-related disclosures in annual reports for fiscal years ending on or after December 15, 2023.",
+      "trigger": "End of fiscal year",
+      "deadline": "Annual",
+      "disclosure_fields": [],
+      "evidence": [
+        "Annual report"
+      ],
+      "cited_sections": [
+        "17 CFR 229.106"
+      ],
+      "source_citations": [
+        "src:78"
+      ]
+    },
+    {
+      "obligation_id": "OBL-007",
+      "rule_provision": "Item 106 of Regulation S-K",
+      "obligation_text": "Registrants must begin tagging disclosures required under the new rules in Inline XBRL within one year after the initial compliance date.",
+      "trigger": "Initial compliance date",
+      "deadline": "One year",
+      "disclosure_fields": [],
+      "evidence": [
+        "Inline XBRL tagging report"
+      ],
+      "cited_sections": [
+        "17 CFR 229.106"
+      ],
+      "source_citations": [
+        "src:63",
+        "src:78"
+      ]
+    },
+    {
+      "obligation_id": "OBL-008",
+      "rule_provision": "Form 6-K",
+      "obligation_text": "Foreign Private Issuers must determine if a cybersecurity incident is material and disclose it on Form 6-K.",
+      "trigger": "Incident determined material",
+      "deadline": null,
+      "disclosure_fields": [
+        "material cybersecurity incident"
+      ],
+      "evidence": [
+        "Form 6-K filing"
+      ],
+      "cited_sections": [
+        "Form 6-K"
+      ],
+      "source_citations": [
+        "src:60"
+      ]
+    }
+  ],
+  "affected_entity_types": [
+    {
+      "entity_type": "Public company",
+      "citation": "src:0"
+    }
+  ],
+  "compliance_impact_areas": [
+    {
+      "area": "Disclosure",
+      "linked_obligation_ids": [
+        "OBL-001",
+        "OBL-002",
+        "OBL-003",
+        "OBL-004",
+        "OBL-005",
+        "OBL-006",
+        "OBL-007",
+        "OBL-008"
+      ],
+      "citations": [
+        "src:0"
+      ]
+    },
+    {
+      "area": "Risk Management",
+      "linked_obligation_ids": [
+        "OBL-006"
+      ],
+      "citations": [
+        "src:0"
+      ]
+    }
+  ],
+  "assumptions": []
+}

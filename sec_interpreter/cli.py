@@ -79,6 +79,28 @@ Examples:
     report_parser.add_argument("--run-id", required=True, help="run_id with validated_output.json")
     report_parser.add_argument("--output", required=True, help="Path to write the markdown report")
 
+    # ------------------------------------------------------------------ scan
+    scan_parser = subparsers.add_parser(
+        "scan",
+        help="Run structure scan on an already-ingested document (no LLM)",
+    )
+    scan_parser.add_argument("--run-id", required=True, help="run_id from a previous ingest run")
+
+    # ------------------------------------------------------------------ bin
+    bin_parser = subparsers.add_parser(
+        "bin",
+        help="Run bin pass (secondary LLM scan over flagged remaining chunks)",
+    )
+    bin_parser.add_argument("--run-id", required=True, help="run_id with validated_output.json")
+
+    # ------------------------------------------------------------------ brief
+    brief_parser = subparsers.add_parser(
+        "brief",
+        help="Generate a case brief from extract + interpret + bin outputs",
+    )
+    brief_parser.add_argument("--run-id", required=True, help="run_id with validated_output.json")
+    brief_parser.add_argument("--output", required=True, help="Path to write the case brief (.md)")
+
     # ------------------------------------------------------------------ comprehend
     comprehend_parser = subparsers.add_parser(
         "comprehend",
@@ -104,6 +126,12 @@ Examples:
         _cmd_gap(args)
     elif args.command == "report":
         _cmd_report(args)
+    elif args.command == "scan":
+        _cmd_scan(args)
+    elif args.command == "bin":
+        _cmd_bin(args)
+    elif args.command == "brief":
+        _cmd_brief(args)
     elif args.command == "comprehend":
         _cmd_comprehend(args)
 
@@ -134,18 +162,55 @@ def _cmd_extract(args) -> None:
 
 
 def _cmd_run(args) -> None:
-    """Ingest + extract in one step — convenience wrapper."""
-    from .module import IngestModule, ExtractModule
+    """Full pipeline: ingest -> extract -> bin -> interpret -> brief."""
+    import os
+    from langchain_core.messages import HumanMessage
+    from .module import IngestModule, ExtractModule, InterpretModule, _load_env_llm, _load_cheap_llm, DeterministicLLM
+    from .bin_graph import run_bin_pass
+    from .prompts import build_case_brief_prompt
+    from .schemas import BinPassOutput
+    from .utils import get_logger
 
+    logger = get_logger("sec_interpreter")
     source, page_range, strict = _resolve_source(args)
 
-    print("Stage 1/2 — Ingesting document...")
+    print("Stage 1/4 — Ingesting document...")
     ingest_result = IngestModule().run(source, page_range=page_range, strict_citations=strict)
     print(f"  run_id={ingest_result.run_id}  chunks={ingest_result.chunk_count}")
 
-    print("Stage 2/2 — Extracting compliance intelligence...")
-    output = ExtractModule().run(ingest_result.run_id, strict_citations=strict)
+    print("Stage 2/4 — Extracting compliance intelligence (structure scan + LLM)...")
+    extract_module = ExtractModule()
+    output = extract_module.run(ingest_result.run_id, strict_citations=strict)
     _write_output(output, args.output)
+
+    artifact_dir = os.path.join("artifacts", ingest_result.run_id)
+
+    print("Stage 3/4 — Bin pass (secondary scan over flagged chunks)...")
+    cheap_llm = _load_cheap_llm() or extract_module.llm
+    extraction_dict = output.model_dump(mode="json")
+    bin_result = run_bin_pass(ingest_result.run_id, extraction_dict, cheap_llm, logger)
+    print(f"  bin findings: {len(bin_result.findings)}")
+
+    print("Stage 4/4 — Interpreting obligations...")
+    interp_module = InterpretModule(llm=extract_module.llm, cheap_llm=cheap_llm)
+    interp_output = interp_module.run(ingest_result.run_id)
+    print(f"  interpretations: {len(interp_output.interpretations)}")
+
+    print("Generating case brief...")
+    named_texts = _load_named_section_texts(artifact_dir)
+    brief_prompt = build_case_brief_prompt(
+        extraction_dict,
+        bin_result.model_dump(mode="json")["findings"],
+        interp_output.model_dump(mode="json"),
+        named_texts,
+    )
+    llm = extract_module.llm
+    response = llm.invoke([HumanMessage(content=brief_prompt)])
+    brief_text = response.content if hasattr(response, "content") else str(response)
+    brief_path = Path(args.output).with_suffix(".brief.md")
+    brief_path.write_text(brief_text, encoding="utf-8")
+    print(f"Case brief written to {brief_path}")
+    print(f"\nArtifacts: {artifact_dir}/")
 
 
 def _cmd_classify(args) -> None:
@@ -229,6 +294,103 @@ def _cmd_report(args) -> None:
     print(f"Report written to {out_path}")
 
 
+def _cmd_scan(args) -> None:
+    """Run structure scan on an already-ingested document and print the result."""
+    import os
+    from .structure import structure_scan
+
+    artifact_dir = os.path.join("artifacts", args.run_id)
+    if not os.path.exists(os.path.join(artifact_dir, "chunks.json")):
+        raise FileNotFoundError(
+            f"No chunks.json found for run_id={args.run_id}. Run ingest first."
+        )
+
+    result = structure_scan(artifact_dir)
+    print(f"Structure scan complete for run_id={args.run_id}")
+    print(f"  obligation sections: {len(result.obligation_sections)}")
+    print(f"  expected obligations: {result.expected_obligation_count}")
+    print(f"  structured chunks: {len(result.structured_chunk_ids)}")
+    print(f"  named section chunks: {len(result.named_section_chunk_ids)}")
+    for sec in result.obligation_sections:
+        cfr = ", ".join(sec.cfr_citations) if sec.cfr_citations else "none"
+        print(f"    [{sec.section_letter}] {sec.heading[:60]}  cfr={cfr}")
+
+
+def _cmd_bin(args) -> None:
+    """Run bin pass over flagged chunks not sent to the main extractor."""
+    import os
+    from .bin_graph import run_bin_pass
+    from .module import _load_cheap_llm, _load_env_llm, DeterministicLLM
+    from .utils import get_logger
+
+    logger = get_logger("sec_interpreter.bin")
+    artifact_dir = os.path.join("artifacts", args.run_id)
+    output_path = os.path.join(artifact_dir, "validated_output.json")
+    if not os.path.exists(output_path):
+        raise FileNotFoundError(
+            f"No validated_output.json for run_id={args.run_id}. Run extract first."
+        )
+
+    with open(output_path, encoding="utf-8") as f:
+        extraction_output = json.load(f)
+
+    cheap_llm = _load_cheap_llm() or _load_env_llm() or DeterministicLLM()
+    result = run_bin_pass(args.run_id, extraction_output, cheap_llm, logger)
+
+    missed = sum(1 for f in result.findings if f.finding_type == "missed_obligation")
+    print(f"Bin pass complete: {len(result.findings)} findings ({missed} missed obligations)")
+    print(f"  bin_findings.json written to {artifact_dir}/")
+
+
+def _cmd_brief(args) -> None:
+    """Generate a case brief from extract + interpret + bin outputs."""
+    import os
+    from langchain_core.messages import HumanMessage
+    from .module import _load_env_llm, DeterministicLLM
+    from .prompts import build_case_brief_prompt
+    from .schemas import BinPassOutput
+
+    artifact_dir = os.path.join("artifacts", args.run_id)
+
+    extract_path = os.path.join(artifact_dir, "validated_output.json")
+    if not os.path.exists(extract_path):
+        raise FileNotFoundError(
+            f"No validated_output.json for run_id={args.run_id}. Run extract first."
+        )
+    with open(extract_path, encoding="utf-8") as f:
+        extraction_output = json.load(f)
+
+    bin_path = os.path.join(artifact_dir, "bin_findings.json")
+    if os.path.exists(bin_path):
+        with open(bin_path, encoding="utf-8") as f:
+            bin_output = BinPassOutput.model_validate(json.load(f))
+    else:
+        bin_output = BinPassOutput(run_id=args.run_id)
+
+    interp_path = os.path.join(artifact_dir, "interpretation.json")
+    interpretation_output = {}
+    if os.path.exists(interp_path):
+        with open(interp_path, encoding="utf-8") as f:
+            interpretation_output = json.load(f)
+
+    named_texts = _load_named_section_texts(artifact_dir)
+    prompt = build_case_brief_prompt(
+        extraction_output,
+        bin_output.model_dump(mode="json")["findings"],
+        interpretation_output,
+        named_texts,
+    )
+
+    llm = _load_env_llm() or DeterministicLLM()
+    response = llm.invoke([HumanMessage(content=prompt)])
+    brief_text = response.content if hasattr(response, "content") else str(response)
+
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(brief_text, encoding="utf-8")
+    print(f"Case brief written to {out_path}")
+
+
 def _cmd_comprehend(args) -> None:
     """Calibration tool: classify every chunk and compare against locator."""
     from .comprehend import run_comprehend
@@ -280,6 +442,37 @@ def _write_output(output, path_str: str) -> None:
         json.dumps(output.model_dump(mode="json"), indent=2), encoding="utf-8"
     )
     print(f"Output written to {output_path}")
+
+
+def _load_named_section_texts(artifact_dir: str) -> list:
+    """Return text strings for named section chunks (effective dates, scope, exemptions).
+
+    Loads structure_scan_result.json -> named_section_chunk_ids, then looks up
+    each chunk's text in chunks.json. Returns empty list if artifacts missing.
+    """
+    import os
+
+    scan_path = os.path.join(artifact_dir, "structure_scan_result.json")
+    chunks_path = os.path.join(artifact_dir, "chunks.json")
+    if not os.path.exists(scan_path) or not os.path.exists(chunks_path):
+        return []
+
+    with open(scan_path, encoding="utf-8") as f:
+        scan_data = json.load(f)
+    named_ids = set(scan_data.get("named_section_chunk_ids", []))
+    if not named_ids:
+        return []
+
+    with open(chunks_path, encoding="utf-8") as f:
+        chunks = json.load(f)
+
+    texts = []
+    for chunk in chunks:
+        if chunk.get("src_id") in named_ids:
+            heading = chunk.get("heading_path", [])
+            heading_str = " > ".join(heading) if heading else ""
+            texts.append(f"[{heading_str}]\n{chunk.get('text', '')}")
+    return texts
 
 
 def _parse_page_range(pages_arg: str | None) -> tuple[int, int] | None:

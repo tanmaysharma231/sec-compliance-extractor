@@ -20,6 +20,7 @@ _SCHEMA = {
     "key_obligations": [
         {
             "obligation_id": "OBL-001",
+            "rule_provision": "specific CFR section or form item imposing this obligation, e.g. '17 CFR 229.106(b)' or 'Item 1.05 Form 8-K'",
             "obligation_text": "One specific, atomic requirement imposed by the rule (one obligation per entry -- do not merge)",
             "trigger": "event or condition that activates this obligation, or null if always active",
             "deadline": "timing requirement if stated (e.g. '4 business days', 'annual', 'within 30 days'), or null",
@@ -190,6 +191,11 @@ def build_extractor_prompt(payload: RuleExtractorInput, selected_chunks: List[Ri
         "- Do not use forbidden terms\n"
         "- EXHAUSTIVENESS: create one obligation entry per distinct requirement found in the source\n"
         "  chunks — do not merge separate requirements. If you find 8 requirements, produce 8 entries.\n"
+        "- obligation_text: write a complete, self-contained sentence that includes WHO must do WHAT,\n"
+        "  by WHEN, and under WHAT condition. Example: 'Registrants must file Form 8-K disclosing a\n"
+        "  material cybersecurity incident within 4 business days of determining it is material.'\n"
+        "  Do not leave out the deadline or trigger -- a reader of obligation_text alone must get the\n"
+        "  full picture. The separate deadline/trigger fields are for machine use and must also be set.\n"
         "- cited_sections: list the specific CFR sections, form items, or rule references that impose\n"
         "  this obligation (e.g. '17 CFR 229.106(b)', 'Form 8-K Item 1.05', 'Rule 13a-11(c)').\n"
         "  Leave empty only if no specific section reference appears in the source chunks.\n"
@@ -306,6 +312,51 @@ def build_gap_analysis_prompt(extracted_output: dict, company_context: str = "")
 # Interpretation pipeline prompts
 # ---------------------------------------------------------------------------
 
+def build_context_linker_prompt(
+    obligation_text: str,
+    obligation_id: str,
+    family_chunks: List[dict],
+) -> str:
+    """
+    Cheap linker LLM pass: classify each family chunk as key | supporting | skip
+    per obligation. Returns integer indices into family_chunks (0-based).
+    """
+    n = len(family_chunks)
+    # Build aligned table
+    header = f"{'idx':<5} | {'role':<10} | {'heading (40 chars)':<40} | {'preview (120 chars)'}"
+    separator = "-" * 100
+    rows = [header, separator]
+    for i, c in enumerate(family_chunks):
+        role = c.get("subsection_role", "")[:10]
+        heading = c.get("heading", "")[:40]
+        preview = c.get("text", "")[:120].replace("\n", " ")
+        rows.append(f"{i:<5} | {role:<10} | {heading:<40} | {preview}")
+    table_text = "\n".join(rows)
+
+    schema_hint = json.dumps(
+        {"key_indices": [0, 2], "supporting_indices": [1], "skip_indices": [3, 4]},
+        indent=2,
+    )
+
+    return (
+        "You are a context pre-filter for an SEC regulatory interpretation pipeline.\n\n"
+        f"OBLIGATION [{obligation_id}]:\n{obligation_text}\n\n"
+        f"FAMILY CHUNKS (indices 0 to {n - 1}):\n"
+        f"{table_text}\n\n"
+        "Classify each chunk index as one of:\n"
+        "  key         -- directly clarifies THIS obligation: edge cases, SEC answers, worked\n"
+        "                 examples, scope limits, timing guidance specific to this requirement\n"
+        "  supporting  -- general section context, useful background but not obligation-specific\n"
+        "  skip        -- tangential, belongs to a different obligation, economic analysis, procedural\n\n"
+        "Rules:\n"
+        f"  - Every index 0 to {n - 1} must appear in exactly one list (exhaustive partition)\n"
+        "  - When in doubt classify as supporting, not skip\n"
+        "  - Output JSON only, no markdown fences\n\n"
+        f"OUTPUT SCHEMA:\n{schema_hint}\n\n"
+        "Generate ObligationContextLinks JSON now:"
+    )
+
+
 def build_reference_judge_prompt(
     obligation_text: str,
     context_so_far: str,
@@ -415,6 +466,209 @@ def build_interpretation_prompt(obligation: dict, context_bundle: dict) -> str:
         "- Output JSON only, no markdown fences\n\n"
         f"OUTPUT SCHEMA:\n{schema_hint}\n\n"
         "Generate ObligationInterpretation JSON now:"
+    )
+
+
+def build_bin_pass_prompt(
+    flagged_chunks: List[dict],
+    known_obligations: List[dict],
+) -> str:
+    """
+    Secondary reviewer pass: classifies flagged chunks that may have been missed
+    by the main extractor. Looks for gaps not already captured in known_obligations.
+
+    flagged_chunks: list of dicts with keys src_id, heading, text, and flag booleans.
+    known_obligations: list of obligation dicts with obligation_id and obligation_text.
+    """
+    # Build known obligations block
+    obl_lines = []
+    for i, obl in enumerate(known_obligations, 1):
+        obl_id = obl.get("obligation_id", f"OBL-{i:03d}")
+        obl_text = obl.get("obligation_text", "")[:150]
+        obl_lines.append(f"  {i}. {obl_id}: {obl_text}")
+    known_obls_block = "\n".join(obl_lines) if obl_lines else "  (no obligations extracted yet)"
+
+    # Build flagged chunks table
+    header = f"{'idx':<5} | {'src_id':<10} | {'heading (40 chars)':<40} | text (first 300 chars)"
+    separator = "-" * 110
+    rows = [header, separator]
+    for i, chunk in enumerate(flagged_chunks):
+        src_id = str(chunk.get("src_id", ""))[:10]
+        heading = str(chunk.get("heading", ""))[:40]
+        text_preview = str(chunk.get("text", ""))[:300].replace("\n", " ")
+        rows.append(f"{i:<5} | {src_id:<10} | {heading:<40} | {text_preview}")
+    table_text = "\n".join(rows)
+
+    schema_hint = json.dumps(
+        {
+            "findings": [
+                {
+                    "finding_type": "scope_modifier",
+                    "text": "...",
+                    "related_to": ["OBL-001"],
+                    "source_chunks": ["src:5"],
+                    "notes": "...",
+                }
+            ]
+        },
+        indent=2,
+    )
+
+    return (
+        "You are a secondary reviewer for an SEC regulatory compliance pipeline.\n\n"
+        "KNOWN OBLIGATIONS (look for gaps, not duplicates already captured above):\n"
+        f"{known_obls_block}\n\n"
+        "FLAGGED CHUNKS TO REVIEW:\n"
+        f"{table_text}\n\n"
+        "For each chunk above, classify it into exactly one of these types:\n"
+        "  missed_obligation  -- a genuine new obligation not already captured in known obligations\n"
+        "  scope_modifier     -- limits or extends who or what is covered by the rule\n"
+        "  implied_requirement -- obligation implied but not explicitly stated\n"
+        "  definition         -- key term with a definition applicable across obligations\n"
+        "  edge_case          -- specific scenario, SEC comment response, or edge case guidance\n"
+        "  not_relevant       -- skip\n\n"
+        "For each finding that is NOT not_relevant, produce:\n"
+        "  - finding_type: one of the types above\n"
+        "  - text: relevant excerpt (max 300 chars)\n"
+        "  - related_to: list of obligation IDs this finding applies to (e.g. [\"OBL-001\"])\n"
+        "  - source_chunks: list of src_id values\n"
+        "  - notes: optional one-sentence explanation\n\n"
+        "OUTPUT SCHEMA:\n"
+        f"{schema_hint}\n\n"
+        "Rules:\n"
+        "  - If in doubt, use not_relevant\n"
+        "  - Only use missed_obligation if genuinely new and NOT already captured above\n"
+        "  - Output JSON only, no markdown fences\n"
+        "  - Omit not_relevant findings from output entirely\n\n"
+        "Generate BinPassOutput JSON now:"
+    )
+
+
+def build_case_brief_prompt(
+    extraction_output: dict,
+    bin_findings: list,
+    interpretation_output: dict,
+    named_section_texts: List[str],
+) -> str:
+    """
+    Produces a plain-text case brief summarising the full compliance picture.
+
+    bin_findings: list of BinFinding dicts.
+    interpretation_output: the InterpretationOutput dict (has 'interpretations' list).
+    named_section_texts: list of "[heading]\\ntext" strings from effective dates / scope / exemption sections.
+    """
+    # Rule metadata
+    metadata = extraction_output.get("rule_metadata", {})
+    rule_title = metadata.get("rule_title", "Unknown Rule")
+    release_number = metadata.get("release_number", "")
+    effective_date = metadata.get("effective_date", "")
+
+    meta_lines = [f"Rule: {rule_title}"]
+    if release_number:
+        meta_lines.append(f"Release: {release_number}")
+    if effective_date:
+        meta_lines.append(f"Effective Date: {effective_date}")
+    meta_block = "\n".join(meta_lines)
+
+    # Obligations block
+    obligations = extraction_output.get("key_obligations", [])
+    obl_lines = []
+    for obl in obligations:
+        obl_id = obl.get("obligation_id", "")
+        rule_provision = obl.get("cited_sections", [])
+        provision_str = ", ".join(rule_provision) if rule_provision else "not specified"
+        obl_text = obl.get("obligation_text", "")
+        deadline = obl.get("deadline") or "not specified"
+        obl_lines.append(
+            f"  [{obl_id}] {obl_text}\n"
+            f"    Rule provision: {provision_str}\n"
+            f"    Deadline: {deadline}"
+        )
+    obligations_block = "\n\n".join(obl_lines) if obl_lines else "  (none extracted)"
+
+    # Bin findings grouped by type
+    finding_groups: dict = {}
+    for f in bin_findings:
+        ftype = f.get("finding_type", "not_relevant")
+        if ftype == "not_relevant":
+            continue
+        finding_groups.setdefault(ftype, []).append(f)
+
+    findings_lines = []
+    for ftype, items in finding_groups.items():
+        findings_lines.append(f"  [{ftype}]")
+        for item in items:
+            text = item.get("text", "")[:300]
+            related = ", ".join(item.get("related_to", []))
+            notes = item.get("notes", "")
+            line = f"    - {text}"
+            if related:
+                line += f" (related: {related})"
+            if notes:
+                line += f" -- {notes}"
+            findings_lines.append(line)
+    findings_block = "\n".join(findings_lines) if findings_lines else "  (none)"
+
+    # Interpretation summaries
+    interpretations = interpretation_output.get("interpretations", [])
+    interp_lines = []
+    for interp in interpretations:
+        obl_id = interp.get("obligation_id", "")
+        primary = interp.get("primary_interpretation", "")[:200]
+        implication = interp.get("compliance_implication", "")[:200]
+        interp_lines.append(
+            f"  [{obl_id}]\n"
+            f"    Interpretation: {primary}\n"
+            f"    Implication: {implication}"
+        )
+    interp_block = "\n\n".join(interp_lines) if interp_lines else "  (none)"
+
+    # Named section texts (effective dates, scope, exemptions)
+    named_block_parts = []
+    for section_text in named_section_texts:
+        named_block_parts.append(section_text[:1500])
+    named_block = "\n\n---\n\n".join(named_block_parts) if named_block_parts else "(none provided)"
+
+    return (
+        "You are an SEC regulatory compliance analyst. Produce a concise case brief for this rule.\n\n"
+        "RULE METADATA:\n"
+        f"{meta_block}\n\n"
+        "OBLIGATIONS:\n"
+        f"{obligations_block}\n\n"
+        "BIN FINDINGS (additional findings from secondary review):\n"
+        f"{findings_block}\n\n"
+        "INTERPRETATION SUMMARIES:\n"
+        f"{interp_block}\n\n"
+        "NAMED SECTIONS (effective dates, scope, exemptions):\n"
+        f"{named_block}\n\n"
+        "Produce a plain-text case brief with exactly these sections.\n"
+        "Use dashes as section headers (e.g. '--- RULE ---'), not markdown.\n\n"
+        "  --- RULE ---\n"
+        "  Name and release number of the rule.\n\n"
+        "  --- APPLIES TO ---\n"
+        "  Who is covered (use scope named sections + scope_modifier findings).\n\n"
+        "  --- EXEMPTIONS ---\n"
+        "  Who is excluded from the rule.\n\n"
+        "  --- OBLIGATIONS ---\n"
+        "  Numbered list, one per OBL-ID, include rule_provision and deadline.\n\n"
+        "  --- KEY DEFINITIONS ---\n"
+        "  From definition findings.\n\n"
+        "  --- SCOPE MODIFIERS ---\n"
+        "  From scope_modifier findings.\n\n"
+        "  --- IMPLIED REQUIREMENTS ---\n"
+        "  From implied_requirement findings.\n\n"
+        "  --- EFFECTIVE DATES ---\n"
+        "  From named section texts.\n\n"
+        "  --- EDGE CASES ---\n"
+        "  From edge_case findings.\n\n"
+        "  --- WHAT IT MEANS IN PRACTICE ---\n"
+        "  One paragraph per obligation from interpretation summaries.\n\n"
+        "Rules:\n"
+        "  - Plain text only, no markdown\n"
+        "  - Use ASCII separators only (dashes, equals signs)\n"
+        "  - Keep total output under 1500 words\n"
+        "  - Do not use forbidden terms: compliant, non-compliant, violation, illegal, penalty exposure\n\n"
+        "Generate the case brief now:"
     )
 
 

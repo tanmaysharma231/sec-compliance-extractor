@@ -1,16 +1,16 @@
 """
 sec_interpreter/extract_graph.py
 
-Purpose: LangGraph pipeline for Stage 2 (ExtractGraph) — two LLM calls.
-         Loads RichChunk artifacts, runs a cheap Locator pass to select relevant
-         chunks, then runs the full Extractor pass on only selected chunks.
+Purpose: LangGraph pipeline for Stage 2 (ExtractGraph).
+         Loads RichChunk artifacts, runs a deterministic structure_scan to select
+         relevant chunks, then runs the full Extractor pass on selected chunks.
 
-Old flow: load_chunks → extract_structured_fields → validate_output
-                      ↗ (retry)  ↖                           → save_extract_artifacts
-New flow: load_chunks → [locator_pass] → extract_structured_fields → validate_output
+Old flow: load_chunks → [locator_pass] → extract_structured_fields → validate_output
                                        ↗ (retry)  ↖               → save_extract_artifacts
+New flow: load_chunks → [structure_scan_pass] → extract_structured_fields → validate_output
+                                              ↗ (retry)  ↖               → save_extract_artifacts
 
-The locator_pass is SKIPPED in direct/inline-text mode (RuleExtractorModule) to
+The structure_scan_pass is SKIPPED in direct/inline-text mode (RuleExtractorModule) to
 preserve backward compatibility with tests that use FakeLLM.
 
 Called by: ExtractModule.run(), RuleExtractorModule.run()
@@ -34,8 +34,9 @@ from .prompts import (
     build_system_prompt,
     build_user_prompt,
 )
-from .schemas import COMPLIANCE_CONTENT_TYPES, DocumentMap, LocatorSelection, RichChunk, RuleExtractorInput, RuleExtractorOutput
+from .schemas import COMPLIANCE_CONTENT_TYPES, DocumentMap, LocatorSelection, RichChunk, RuleExtractorInput, RuleExtractorOutput, StructureScanResult
 from .scorer import build_index_row
+from .structure import gap_check, structure_scan
 from .utils import (
     enforce_citation_bounds,
     enforce_obligation_links,
@@ -53,10 +54,11 @@ class ExtractState(TypedDict, total=False):
     run_id: str                              # ties back to the ingest artifacts
     payload: RuleExtractorInput              # rule_text + strict_citations
     chunks: List[RichChunk]                  # full chunk list (for citation bounds)
-    summary_text: str                        # NEW: loaded from artifacts
-    locator_selection: LocatorSelection      # NEW: Locator LLM output
-    selected_chunks: List[RichChunk]         # NEW: chunks passed to Extractor
-    skip_locator: bool                       # NEW: True in direct/inline-text mode
+    summary_text: str                        # loaded from artifacts
+    scan_result: StructureScanResult         # structure_scan output (replaces locator_selection)
+    locator_selection: LocatorSelection      # kept for backward compat artifact writing
+    selected_chunks: List[RichChunk]         # chunks passed to Extractor
+    skip_locator: bool                       # True in direct/inline-text mode
     raw_output: str
     output: Optional[RuleExtractorOutput]
     retry_count: int
@@ -177,172 +179,64 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
     # ------------------------------------------------------------------
     # Routing after load_chunks
     # ------------------------------------------------------------------
-    def _route_after_load(state: ExtractState) -> Literal["locator_pass", "extract_structured_fields"]:
+    def _route_after_load(state: ExtractState) -> Literal["structure_scan_pass", "extract_structured_fields"]:
         if state.get("skip_locator", False):
             return "extract_structured_fields"
-        return "locator_pass"
+        return "structure_scan_pass"
 
     # ------------------------------------------------------------------
-    # Node: locator_pass
-    # If chunks have content_type populated (classify has been run), skip
-    # the LLM locator entirely and filter deterministically by content type.
-    # Falls back to LLM locator when content_type is not available.
+    # Node: structure_scan_pass
+    # Replaces the LLM-based locator with a deterministic heading scan.
+    # Reads sections.json + chunks.json from artifact_dir to identify
+    # lettered obligation sections and collect final/codified chunk IDs.
+    # Falls back to all chunks if the scan finds nothing (e.g. old artifacts
+    # without section_family / subsection_role populated).
     # ------------------------------------------------------------------
-    def locator_pass(state: ExtractState) -> ExtractState:
+    def structure_scan_pass(state: ExtractState) -> ExtractState:
+        run_id = state["run_id"]
         chunks = state["chunks"]
-        summary_text = state.get("summary_text", "")
+        artifact_dir = os.path.join("artifacts", run_id)
 
-        # Check if classify has been run (any chunk has non-empty content_type)
-        classified_chunks = [c for c in chunks if c.content_type]
-        if classified_chunks:
-            run_id = state["run_id"]
-            src_index = {c.src_id: i for i, c in enumerate(chunks)}
-
-            # Prefer document_map retrieval: section-level, deterministic section_id lists
-            doc_map_path = os.path.join("artifacts", run_id, "document_map.json")
-            if os.path.exists(doc_map_path):
-                with open(doc_map_path, encoding="utf-8") as f:
-                    doc_map = DocumentMap.model_validate(json.load(f))
-                target_section_ids = set(doc_map.compliance_section_ids)
-                selected_chunks = [c for c in chunks if c.section_id in target_section_ids]
-                logger.info(
-                    "document_map retrieval: %d / %d chunks selected (%d compliance sections)",
-                    len(selected_chunks), len(chunks), len(target_section_ids),
-                )
-            else:
-                # Fallback: content_type filter direct on chunks (no document_map)
-                selected_chunks = [c for c in chunks if c.content_type in COMPLIANCE_CONTENT_TYPES]
-                logger.info(
-                    "content_type filter: %d / %d chunks selected (no document_map found)",
-                    len(selected_chunks), len(chunks),
-                )
-
-            # Always include src:0 (cover page) -- has title, release number, effective date
-            selected_ids = {c.src_id for c in selected_chunks}
-            if "src:0" not in selected_ids and chunks:
-                selected_chunks.append(chunks[0])
-                logger.info("Prepended src:0 (cover page) for metadata extraction")
-
-            # Preserve original order
-            selected_chunks = sorted(selected_chunks, key=lambda c: src_index.get(c.src_id, 0))
-
-            # Build a synthetic LocatorSelection for artifact compatibility
-            obl_ids = [c.src_id for c in selected_chunks
-                       if c.content_type in {"final_rule_text", "obligation"}]
-            def_ids = [c.src_id for c in selected_chunks if c.content_type == "definition"]
-            selection = LocatorSelection(obligation_chunks=obl_ids, definition_chunks=def_ids)
-
-            artifact_dir = os.path.join("artifacts", run_id)
-            os.makedirs(artifact_dir, exist_ok=True)
-            _write_file(
-                artifact_dir,
-                "locator_selection.json",
-                json.dumps(selection.model_dump(mode="json"), indent=2),
-            )
-
-            return {
-                "locator_selection": selection,
-                "selected_chunks": selected_chunks,
-                "token_usage": {"locator": {}},
-            }
-
-        # -----------------------------------------------------------
-        # Fallback: LLM-based locator (classify not run yet)
-        # -----------------------------------------------------------
-        # Build compact index table
-        index_rows = [build_index_row(c) for c in chunks]
-
-        # Build chunk lookup map
+        src_index = {c.src_id: i for i, c in enumerate(chunks)}
         chunk_map = {c.src_id: c for c in chunks}
 
-        # Call Locator LLM
-        locator_prompt = build_locator_prompt(summary_text, index_rows)
-        messages = [HumanMessage(content=locator_prompt)]
+        # Run deterministic structure scan
+        scan_result = structure_scan(artifact_dir)
 
-        response = llm.invoke(messages)
-        locator_usage = _extract_usage(response)
-        raw = _normalize_content(getattr(response, "content", response))
+        structured_ids = set(scan_result.structured_chunk_ids)
 
-        # Parse LocatorSelection
-        try:
-            parsed = parse_json_object(raw)
-            selection = LocatorSelection.model_validate(parsed)
-        except Exception as exc:
-            logger.warning("Locator parse failed (%s); selecting all obligation-flagged chunks", exc)
-            obl_ids = [c.src_id for c in chunks if c.has_obligations][:60]
-            selection = LocatorSelection(obligation_chunks=obl_ids or [chunks[0].src_id])
-
-        # Force-inject all codified chunks into obligation_chunks (deterministic, no LLM needed)
-        codified_ids = [c.src_id for c in chunks if c.has_codified_text]
-        if codified_ids:
-            merged_obl = list(dict.fromkeys(selection.obligation_chunks + codified_ids))
-            selection = LocatorSelection(
-                date_chunks=selection.date_chunks,
-                scope_chunks=selection.scope_chunks,
-                obligation_chunks=merged_obl,
-                definition_chunks=selection.definition_chunks,
-                other_key_chunks=selection.other_key_chunks,
+        if structured_ids:
+            selected_chunks = [c for c in chunks if c.src_id in structured_ids]
+            # Also include named section chunks (effective dates, scope, exemptions)
+            for sid in scan_result.named_section_chunk_ids:
+                if sid in chunk_map and sid not in structured_ids:
+                    selected_chunks.append(chunk_map[sid])
+                    structured_ids.add(sid)
+            # Always include src:0 (cover page) -- has title, release number, effective date
+            if "src:0" not in structured_ids and chunks:
+                selected_chunks.append(chunks[0])
+            # Preserve document order
+            selected_chunks = sorted(
+                selected_chunks,
+                key=lambda c: src_index.get(c.src_id, 0),
             )
-            logger.info("Force-injected %d codified chunks into obligation_chunks", len(codified_ids))
-
-        # Validate: all src_ids must exist
-        all_selected_ids = _union_src_ids(selection)
-        valid_ids = [sid for sid in all_selected_ids if sid in chunk_map]
-        invalid = set(all_selected_ids) - set(valid_ids)
-        if invalid:
-            logger.warning("Locator returned unknown src_ids: %s -- dropping them", invalid)
-        if not valid_ids:
-            logger.warning("No valid src_ids from Locator; falling back to all chunks")
-            valid_ids = [c.src_id for c in chunks]
-
-        # Validate: obligation_chunks must be non-empty after filtering
-        obl_valid = [sid for sid in selection.obligation_chunks if sid in chunk_map]
-        if not obl_valid:
-            logger.warning("obligation_chunks empty after validation; using all obligation-flagged chunks")
-            obl_valid = [c.src_id for c in chunks if c.has_obligations]
-            if not obl_valid:
-                obl_valid = [chunks[0].src_id]
-            selection = LocatorSelection(
-                date_chunks=selection.date_chunks,
-                scope_chunks=selection.scope_chunks,
-                obligation_chunks=obl_valid,
-                definition_chunks=selection.definition_chunks,
-                other_key_chunks=selection.other_key_chunks,
+            logger.info(
+                "structure_scan selected %d / %d chunks (%d obligation sections)",
+                len(selected_chunks), len(chunks), len(scan_result.obligation_sections),
             )
-
-        # Apply cap: max 60 total
-        final_ids = _union_src_ids(selection)
-        final_ids = [sid for sid in final_ids if sid in chunk_map]
-        if len(final_ids) > 60:
-            logger.info("Locator selected %d chunks; capping at 60", len(final_ids))
-            final_ids = final_ids[:60]
-
-        # Resolve to full RichChunk objects, preserving original order
-        src_order = {c.src_id: c.chunk_index_in_section + (int(c.src_id.split(":")[1]) * 1000)
-                     for c in chunks}
-        selected_chunks = sorted(
-            [chunk_map[sid] for sid in set(final_ids)],
-            key=lambda c: src_order.get(c.src_id, 0),
-        )
-
-        logger.info(
-            "Locator selected %d / %d chunks (obligation: %d)",
-            len(selected_chunks), len(chunks), len(obl_valid),
-        )
-
-        # Save locator_selection.json
-        artifact_dir = os.path.join("artifacts", state["run_id"])
-        os.makedirs(artifact_dir, exist_ok=True)
-        _write_file(
-            artifact_dir,
-            "locator_selection.json",
-            json.dumps(selection.model_dump(mode="json"), indent=2),
-        )
+        else:
+            # Fallback: scan found nothing -- old artifacts without section_family/subsection_role
+            logger.warning(
+                "structure_scan returned no structured_chunk_ids for run_id=%s; "
+                "falling back to all chunks",
+                run_id,
+            )
+            selected_chunks = list(chunks)
 
         return {
-            "locator_selection": selection,
+            "scan_result": scan_result,
             "selected_chunks": selected_chunks,
-            "token_usage": {"locator": locator_usage},
+            "token_usage": {"locator": {}},
         }
 
     # ------------------------------------------------------------------
@@ -459,7 +353,7 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
         raw_output = state.get("raw_output", "")
         output = state["output"]
         selected_chunks = state.get("selected_chunks") or chunks
-        locator_selection = state.get("locator_selection")
+        scan_result: Optional[StructureScanResult] = state.get("scan_result")
 
         artifact_dir = os.path.join("artifacts", run_id)
         os.makedirs(artifact_dir, exist_ok=True)
@@ -471,14 +365,21 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
             json.dumps(output.model_dump(mode="json"), indent=2),
         )
 
-        # Save locator_selection.json if not already written (direct mode has no locator)
-        locator_path = os.path.join(artifact_dir, "locator_selection.json")
-        if locator_selection and not os.path.exists(locator_path):
+        # Run gap_check if we have a scan_result (structure_scan_pass ran)
+        if scan_result is not None:
+            output_dict = output.model_dump(mode="json")
+            gap_report = gap_check(output_dict, scan_result, logger)
             _write_file(
                 artifact_dir,
-                "locator_selection.json",
-                json.dumps(locator_selection.model_dump(mode="json"), indent=2),
+                "gap_report.json",
+                json.dumps(gap_report, indent=2),
             )
+            if gap_report["count_gap"] > 0 or gap_report["flagged_sections"]:
+                logger.warning(
+                    "gap_report: count_gap=%d, flagged_sections=%d",
+                    gap_report["count_gap"],
+                    len(gap_report["flagged_sections"]),
+                )
 
         model_name = os.getenv("SEC_INTERPRETER_MODEL", "DeterministicLLM")
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -489,6 +390,7 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
         extractor_usage = token_usage.get("extractor", {})
         grand_total = locator_usage.get("total_tokens", 0) + extractor_usage.get("total_tokens", 0)
 
+        structure_scan_used = scan_result is not None
         log = (
             f"run_id: {run_id}\n"
             f"model: {model_name}\n"
@@ -497,9 +399,7 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
             f"retries: {retries}\n"
             f"timestamp: {timestamp}\n"
             f"validation_result: success\n"
-            f"locator_prompt_tokens: {locator_usage.get('prompt_tokens', 0)}\n"
-            f"locator_completion_tokens: {locator_usage.get('completion_tokens', 0)}\n"
-            f"locator_total_tokens: {locator_usage.get('total_tokens', 0)}\n"
+            f"structure_scan_used: {structure_scan_used}\n"
             f"extractor_prompt_tokens: {extractor_usage.get('prompt_tokens', 0)}\n"
             f"extractor_completion_tokens: {extractor_usage.get('completion_tokens', 0)}\n"
             f"extractor_total_tokens: {extractor_usage.get('total_tokens', 0)}\n"
@@ -516,9 +416,8 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
                 "selected_chunks": len(selected_chunks),
                 "retries": retries,
                 "model": model_name,
-                "locator_used": locator_selection is not None,
+                "structure_scan_used": structure_scan_used,
                 "token_usage": {
-                    "locator": locator_usage,
                     "extractor": extractor_usage,
                     "grand_total_tokens": grand_total,
                 },
@@ -555,7 +454,7 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
     # ------------------------------------------------------------------
     graph = StateGraph(ExtractState)
     graph.add_node("load_chunks", load_chunks)
-    graph.add_node("locator_pass", locator_pass)
+    graph.add_node("structure_scan_pass", structure_scan_pass)
     graph.add_node("extract_structured_fields", extract_structured_fields)
     graph.add_node("validate_output", validate_output)
     graph.add_node("increment_retry", increment_retry)
@@ -566,11 +465,11 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
         "load_chunks",
         _route_after_load,
         {
-            "locator_pass": "locator_pass",
+            "structure_scan_pass": "structure_scan_pass",
             "extract_structured_fields": "extract_structured_fields",
         },
     )
-    graph.add_edge("locator_pass", "extract_structured_fields")
+    graph.add_edge("structure_scan_pass", "extract_structured_fields")
     graph.add_edge("extract_structured_fields", "validate_output")
     graph.add_conditional_edges(
         "validate_output",
