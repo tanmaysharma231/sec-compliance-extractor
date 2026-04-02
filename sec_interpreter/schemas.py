@@ -83,8 +83,6 @@ class KeyObligation(BaseModel):
     obligation_text: str
     trigger: Optional[str] = None
     deadline: Optional[str] = None
-    disclosure_fields: List[str] = Field(default_factory=list)
-    evidence: List[str] = Field(default_factory=list)
     cited_sections: List[str] = Field(default_factory=list)
     source_citations: List[str] = Field(default_factory=list)
 
@@ -153,6 +151,16 @@ class RuleExtractorOutput(BaseModel):
     key_obligations: List[KeyObligation]
     affected_entity_types: List[AffectedEntityType]
     compliance_impact_areas: List[ComplianceImpactArea]
+    assumptions: List[Assumption] = Field(default_factory=list)
+
+
+class SectionExtractOutput(BaseModel):
+    """Partial extraction result from one section-level LLM call."""
+    model_config = ConfigDict(extra="forbid")
+
+    key_obligations: List[KeyObligation] = Field(default_factory=list)
+    affected_entity_types: List[AffectedEntityType] = Field(default_factory=list)
+    compliance_impact_areas: List[ComplianceImpactArea] = Field(default_factory=list)
     assumptions: List[Assumption] = Field(default_factory=list)
 
 
@@ -242,11 +250,15 @@ class ObligationInterpretation(BaseModel):
 
     obligation_id: str
     primary_interpretation: str
+    key_details: List[str] = Field(default_factory=list)
     supporting_sections: List[str] = Field(default_factory=list)
     alternative_interpretations: List[str] = Field(default_factory=list)
     ambiguous_terms: List[str] = Field(default_factory=list)
     compliance_implication: str
     confidence_level: Literal["high", "medium", "low"] = "medium"
+    needs_more_context: bool = False
+    lookup_requests: List[str] = Field(default_factory=list)
+    parent_obligation_ids: List[str] = Field(default_factory=list)
 
 
 class ObligationContextLinks(BaseModel):

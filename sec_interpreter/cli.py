@@ -101,6 +101,18 @@ Examples:
     brief_parser.add_argument("--run-id", required=True, help="run_id with validated_output.json")
     brief_parser.add_argument("--output", required=True, help="Path to write the case brief (.md)")
 
+    # ------------------------------------------------------------------ eval
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help="LLM-as-judge evaluation of interpretation output against reference criteria",
+    )
+    eval_parser.add_argument("--run-id", required=True, help="run_id with interpretation.json")
+    eval_parser.add_argument(
+        "--criteria",
+        default="tests/eval_criteria.json",
+        help="Path to eval_criteria.json (default: tests/eval_criteria.json)",
+    )
+
     # ------------------------------------------------------------------ comprehend
     comprehend_parser = subparsers.add_parser(
         "comprehend",
@@ -132,6 +144,8 @@ Examples:
         _cmd_bin(args)
     elif args.command == "brief":
         _cmd_brief(args)
+    elif args.command == "eval":
+        _cmd_eval(args)
     elif args.command == "comprehend":
         _cmd_comprehend(args)
 
@@ -389,6 +403,19 @@ def _cmd_brief(args) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(brief_text, encoding="utf-8")
     print(f"Case brief written to {out_path}")
+
+
+def _cmd_eval(args) -> None:
+    """LLM-as-judge evaluation of interpretation output against reference criteria."""
+    import os as _os
+    from .eval import run_eval, print_report
+    from .module import _load_cheap_llm, _load_env_llm, DeterministicLLM
+
+    llm = _load_cheap_llm() or _load_env_llm() or DeterministicLLM()
+    report = run_eval(args.run_id, args.criteria, llm)
+    print_report(report)
+    artifact_dir = _os.path.join("artifacts", args.run_id)
+    print(f"Full report saved to {artifact_dir}/eval_report.json")
 
 
 def _cmd_comprehend(args) -> None:

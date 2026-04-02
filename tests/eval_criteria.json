@@ -1,0 +1,76 @@
+{
+  "sources": [
+    "https://safe.security/resources/insights/secs-new-final-rule-simplified/",
+    "https://dart.deloitte.com/USDART/home/publications/deloitte/heads-up/2023/sec-rule-cyber-disclosures"
+  ],
+  "obligations": {
+    "OBL-001": {
+      "description": "Material cybersecurity incident disclosure on Form 8-K (Item 1.05)",
+      "criteria": [
+        "The 4-day clock starts at the materiality determination, not at the date the incident was discovered or detected",
+        "Materiality is assessed using a reasonable person or reasonable investor standard, not a fixed numerical threshold",
+        "When uncertain whether an incident is material, companies should favor disclosure rather than withholding",
+        "The materiality determination process cannot be unreasonably delayed in order to avoid or postpone the filing deadline",
+        "A national security exception exists that allows the company to delay the Form 8-K filing",
+        "The disclosure covers basic identifying details and the material impact of the incident, not full remediation details",
+        "Cross-functional coordination is required involving cybersecurity, legal, finance, and disclosure teams",
+        "The scope of coverage includes incidents on third-party systems, not only systems owned by the registrant",
+        "Registrants are not required to disclose specific technical information that could reveal vulnerabilities or impair incident response or remediation",
+        "A series of related unauthorized occurrences can collectively meet the materiality threshold and trigger a single Form 8-K",
+        "The Form 8-K must address both the nature, scope, and timing of the incident AND its material impact on the company's financial condition and results of operations",
+        "Intentionally deferring committee meetings beyond typical timeframes or altering incident response policies to extend the determination timeline constitutes unreasonable delay",
+        "The national security delay can be extended in stages up to a total of 120 days in extraordinary circumstances",
+        "Failure to timely file the Form 8-K for a material cybersecurity incident does not affect the company's Form S-3 or Form SF-3 shelf registration eligibility"
+      ]
+    },
+    "OBL-002": {
+      "description": "Describe material aspects of the incident in Form 8-K",
+      "criteria": [
+        "The disclosure must cover the nature and scope of the incident",
+        "The rule does NOT require disclosure of whether the incident is ongoing, its remediation status, or whether data was compromised (these were proposed but dropped in the final rule)",
+        "The disclosure must describe the material impact or reasonably likely material impact on the company",
+        "Companies may file with incomplete information and amend the Form 8-K within four business days once that information becomes available",
+        "The company must seek missing information without unreasonable delay before filing the amendment"
+      ]
+    },
+    "OBL-003": {
+      "description": "Form 8-K amendment when initially unavailable information becomes available",
+      "criteria": [
+        "An amendment must be filed within four business days of the registrant determining or obtaining previously unavailable information",
+        "The amendment obligation is triggered when information was not known or available at the time of the initial Form 8-K filing",
+        "The company must actively seek missing information without unreasonable delay rather than waiting passively"
+      ]
+    },
+    "OBL-006": {
+      "description": "Annual cybersecurity risk management, strategy, and governance disclosure (Item 1C / Item 106)",
+      "criteria": [
+        "Companies must disclose their processes for assessing, identifying, and managing material risks from cybersecurity threats",
+        "Disclosure must state whether cybersecurity risk processes are integrated into the company's overall enterprise risk management system",
+        "Disclosure must state whether the company engages third-party assessors, consultants, auditors, or other parties in its cybersecurity risk processes",
+        "Disclosure must cover how the company identifies and manages material cybersecurity risks arising from its use of third-party service providers",
+        "Companies must explain whether cybersecurity risks have materially affected or are reasonably likely to materially affect business strategy, results of operations, or financial condition",
+        "Board oversight of cybersecurity risk must be disclosed, including which specific board committee or subcommittee is responsible",
+        "Disclosure must describe the processes by which the board or committee is informed about cybersecurity threats and incidents",
+        "Management's role and relevant expertise in assessing and managing cybersecurity risk must be disclosed",
+        "Relevant management expertise includes prior work experience in cybersecurity, degrees or certifications, and other cybersecurity knowledge or background",
+        "Disclosure must describe whether and how management reports cybersecurity information up to the board or board committee",
+        "The disclosure must cover how cybersecurity risks are integrated into the overall risk management strategy"
+      ]
+    },
+    "OBL-007": {
+      "description": "Inline XBRL tagging of cybersecurity disclosures",
+      "criteria": [
+        "XBRL tagging requirement begins one year after the initial compliance date for the respective disclosure",
+        "The tagging requirement applies to both the Form 8-K incident disclosures and the Form 10-K annual cybersecurity disclosures"
+      ]
+    },
+    "OBL-008": {
+      "description": "Foreign private issuer cybersecurity disclosure obligations",
+      "criteria": [
+        "Foreign private issuers must furnish material cybersecurity incidents on Form 6-K when those incidents are disclosed or publicized in a foreign jurisdiction or to any stock exchange",
+        "Foreign private issuers must disclose board oversight of cybersecurity risks and management's role in the Form 20-F annual report",
+        "FPI compliance dates align with domestic registrant effective dates"
+      ]
+    }
+  }
+}

@@ -11,11 +11,11 @@ from sec_interpreter.schemas import (
 
 
 # ---------------------------------------------------------------------------
-# KeyObligation -- new optional fields: trigger, deadline, disclosure_fields, evidence
+# KeyObligation -- optional fields: trigger, deadline
 # ---------------------------------------------------------------------------
 
-def test_key_obligation_new_fields_all_optional() -> None:
-    """Existing obligations without new fields should still validate."""
+def test_key_obligation_optional_fields_default() -> None:
+    """Existing obligations without optional fields should still validate."""
     obl = KeyObligation(
         obligation_id="OBL-001",
         obligation_text="Registrants should disclose material incidents.",
@@ -23,25 +23,19 @@ def test_key_obligation_new_fields_all_optional() -> None:
     )
     assert obl.trigger is None
     assert obl.deadline is None
-    assert obl.disclosure_fields == []
-    assert obl.evidence == []
 
 
-def test_key_obligation_new_fields_populated() -> None:
+def test_key_obligation_fields_populated() -> None:
     obl = KeyObligation(
         obligation_id="OBL-001",
         obligation_text="Disclose material cybersecurity incidents.",
         trigger="Incident determined to be material",
         deadline="4 business days",
-        disclosure_fields=["nature of incident", "scope", "timing", "material impact"],
-        evidence=["Form 8-K filing", "materiality determination memo"],
         cited_sections=["17 CFR 229.106(b)"],
         source_citations=["src:0"],
     )
     assert obl.trigger == "Incident determined to be material"
     assert obl.deadline == "4 business days"
-    assert len(obl.disclosure_fields) == 4
-    assert "Form 8-K filing" in obl.evidence
 
 
 def test_key_obligation_rejects_bad_source_citation() -> None:
@@ -51,16 +45,6 @@ def test_key_obligation_rejects_bad_source_citation() -> None:
             obligation_text="Some obligation.",
             source_citations=["chunk-0"],  # wrong format
         )
-
-
-def test_key_obligation_disclosure_fields_is_list_of_strings() -> None:
-    obl = KeyObligation(
-        obligation_id="OBL-002",
-        obligation_text="Annual disclosure of cybersecurity governance.",
-        disclosure_fields=["board oversight description", "management expertise"],
-        source_citations=["src:1"],
-    )
-    assert all(isinstance(f, str) for f in obl.disclosure_fields)
 
 
 # ---------------------------------------------------------------------------

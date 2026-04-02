@@ -31,10 +31,11 @@ from .prompts import (
     build_extractor_prompt,
     build_locator_prompt,
     build_retry_user_prompt,
+    build_section_extractor_prompt,
     build_system_prompt,
     build_user_prompt,
 )
-from .schemas import COMPLIANCE_CONTENT_TYPES, DocumentMap, LocatorSelection, RichChunk, RuleExtractorInput, RuleExtractorOutput, StructureScanResult
+from .schemas import COMPLIANCE_CONTENT_TYPES, DocumentMap, LocatorSelection, RichChunk, RuleExtractorInput, RuleExtractorOutput, SectionExtractOutput, StructureScanResult
 from .scorer import build_index_row
 from .structure import gap_check, structure_scan
 from .utils import (
@@ -64,6 +65,7 @@ class ExtractState(TypedDict, total=False):
     retry_count: int
     last_error: Optional[str]
     token_usage: dict                        # accumulated token counts across LLM calls
+    section_partial_outputs: List[dict]      # raw dicts from each per-section LLM call
 
 
 def build_extract_graph(llm: Any, logger: logging.Logger):
@@ -240,6 +242,178 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
         }
 
     # ------------------------------------------------------------------
+    # Node: extract_sections_loop
+    # Runs one LLM call per obligation section identified by structure_scan.
+    # First section uses full RuleExtractorOutput schema (produces rule_metadata
+    # and rule_summary). Subsequent sections use SectionExtractOutput (partial).
+    # Prior obligations are passed as cross-section context to avoid re-extraction.
+    # ------------------------------------------------------------------
+    section_structured_llm = _try_section_structured_output(llm, logger)
+
+    def extract_sections_loop(state: ExtractState) -> ExtractState:
+        scan_result: StructureScanResult = state["scan_result"]
+        selected_chunks: List[RichChunk] = state.get("selected_chunks") or state["chunks"]
+        chunks = state["chunks"]
+        summary_text = state.get("summary_text", "")
+        payload = state["payload"]
+        existing_usage = state.get("token_usage") or {}
+
+        chunk_map = {c.src_id: c for c in selected_chunks}
+        all_chunk_src_index = {c.src_id: i for i, c in enumerate(chunks)}
+
+        prior_obligations: List[dict] = []
+        partial_outputs: List[dict] = []
+        section_token_usages: List[dict] = []
+
+        for sec_idx, obl_section in enumerate(scan_result.obligation_sections):
+            # Collect chunks for this section in document order
+            sec_chunk_ids = set(obl_section.structured_chunk_ids)
+            sec_chunks = sorted(
+                [chunk_map[sid] for sid in sec_chunk_ids if sid in chunk_map],
+                key=lambda c: all_chunk_src_index.get(c.src_id, 999999),
+            )
+
+            if not sec_chunks:
+                logger.warning(
+                    "section %s has no chunks in selected set -- skipping",
+                    obl_section.section_letter,
+                )
+                continue
+
+            obligation_id_start = len(prior_obligations) + 1
+            section_heading = obl_section.heading
+
+            system_prompt = build_system_prompt()
+
+            if sec_idx == 0:
+                # First section: use full schema so rule_metadata + rule_summary are extracted.
+                # Augment with named section chunks (scope, effective dates) and src:0 (cover page).
+                extra_ids = set(scan_result.named_section_chunk_ids) | {"src:0"}
+                extra_chunks = sorted(
+                    [c for c in selected_chunks if c.src_id in extra_ids and c.src_id not in sec_chunk_ids],
+                    key=lambda c: all_chunk_src_index.get(c.src_id, 999999),
+                )
+                first_section_chunks = sorted(
+                    sec_chunks + extra_chunks,
+                    key=lambda c: all_chunk_src_index.get(c.src_id, 999999),
+                )
+                user_prompt = build_extractor_prompt(payload, first_section_chunks)
+                messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+
+                raw_output = None
+                usage = {}
+                if structured_llm is not None:
+                    try:
+                        result = structured_llm.invoke(messages)
+                        raw_response = result.get("raw")
+                        usage = _extract_usage(raw_response) if raw_response else {}
+                        parsed: RuleExtractorOutput = result.get("parsed")
+                        if parsed is None:
+                            raise ValueError(result.get("parsing_error") or "Structured output returned None")
+                        raw_output = json.dumps(parsed.model_dump(mode="json"))
+                    except Exception as exc:
+                        logger.warning("Section 0 structured output failed (%s), falling back", exc)
+                        raw_output = None
+
+                if raw_output is None:
+                    response = llm.invoke(messages)
+                    usage = _extract_usage(response)
+                    raw_output = _normalize_content(getattr(response, "content", response))
+
+                partial_outputs.append({"_raw": raw_output, "_is_first": True})
+                section_token_usages.append(usage)
+
+                # Parse for prior_obligations update
+                try:
+                    raw_dict = parse_json_object(raw_output) if isinstance(raw_output, str) else {}
+                    for obl in raw_dict.get("key_obligations", []):
+                        prior_obligations.append({
+                            "obligation_id": obl.get("obligation_id", ""),
+                            "obligation_text": obl.get("obligation_text", "")[:80],
+                        })
+                except Exception:
+                    pass
+
+            else:
+                # Subsequent sections: partial schema, prior obligations as context.
+                user_prompt = build_section_extractor_prompt(
+                    section_heading=section_heading,
+                    section_chunks=sec_chunks,
+                    prior_obligations=prior_obligations,
+                    summary_text=summary_text,
+                    obligation_id_start=obligation_id_start,
+                    strict_citations=payload.strict_citations,
+                )
+                messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+
+                raw_output = None
+                usage = {}
+                if section_structured_llm is not None:
+                    try:
+                        result = section_structured_llm.invoke(messages)
+                        raw_response = result.get("raw")
+                        usage = _extract_usage(raw_response) if raw_response else {}
+                        parsed_sec: SectionExtractOutput = result.get("parsed")
+                        if parsed_sec is None:
+                            raise ValueError(result.get("parsing_error") or "Structured output returned None")
+                        raw_output = json.dumps(parsed_sec.model_dump(mode="json"))
+                    except Exception as exc:
+                        logger.warning("Section %s structured output failed (%s), falling back", obl_section.section_letter, exc)
+                        raw_output = None
+
+                if raw_output is None:
+                    response = llm.invoke(messages)
+                    usage = _extract_usage(response)
+                    raw_output = _normalize_content(getattr(response, "content", response))
+
+                partial_outputs.append({"_raw": raw_output, "_is_first": False})
+                section_token_usages.append(usage)
+
+                # Update prior_obligations
+                try:
+                    raw_dict = parse_json_object(raw_output) if isinstance(raw_output, str) else {}
+                    for obl in raw_dict.get("key_obligations", []):
+                        prior_obligations.append({
+                            "obligation_id": obl.get("obligation_id", ""),
+                            "obligation_text": obl.get("obligation_text", "")[:80],
+                        })
+                except Exception:
+                    pass
+
+            logger.info(
+                "section %s done -- running total %d obligations",
+                obl_section.section_letter,
+                len(prior_obligations),
+            )
+
+        # Merge all partial outputs into one RuleExtractorOutput-shaped dict
+        parsed_partials = []
+        for p in partial_outputs:
+            try:
+                d = parse_json_object(p["_raw"])
+                d["_is_first"] = p["_is_first"]
+                parsed_partials.append(d)
+            except Exception as exc:
+                logger.warning("Failed to parse partial output: %s", exc)
+
+        merged = _merge_section_outputs(parsed_partials, chunks)
+        merged_json = json.dumps(merged)
+
+        # Accumulate token usage
+        combined_extractor_usage = {
+            "prompt_tokens": sum(u.get("prompt_tokens", 0) for u in section_token_usages),
+            "completion_tokens": sum(u.get("completion_tokens", 0) for u in section_token_usages),
+            "total_tokens": sum(u.get("total_tokens", 0) for u in section_token_usages),
+        }
+
+        return {
+            "raw_output": merged_json,
+            "output": None,
+            "section_partial_outputs": partial_outputs,
+            "token_usage": {**existing_usage, "extractor": combined_extractor_usage},
+        }
+
+    # ------------------------------------------------------------------
     # Node: extract_structured_fields
     # ------------------------------------------------------------------
     def extract_structured_fields(state: ExtractState) -> ExtractState:
@@ -391,6 +565,8 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
         grand_total = locator_usage.get("total_tokens", 0) + extractor_usage.get("total_tokens", 0)
 
         structure_scan_used = scan_result is not None
+        section_partial_outputs = state.get("section_partial_outputs") or []
+        section_call_count = len(section_partial_outputs) if section_partial_outputs else 0
         log = (
             f"run_id: {run_id}\n"
             f"model: {model_name}\n"
@@ -400,6 +576,7 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
             f"timestamp: {timestamp}\n"
             f"validation_result: success\n"
             f"structure_scan_used: {structure_scan_used}\n"
+            f"section_call_count: {section_call_count}\n"
             f"extractor_prompt_tokens: {extractor_usage.get('prompt_tokens', 0)}\n"
             f"extractor_completion_tokens: {extractor_usage.get('completion_tokens', 0)}\n"
             f"extractor_total_tokens: {extractor_usage.get('total_tokens', 0)}\n"
@@ -417,6 +594,7 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
                 "retries": retries,
                 "model": model_name,
                 "structure_scan_used": structure_scan_used,
+                "section_call_count": section_call_count,
                 "token_usage": {
                     "extractor": extractor_usage,
                     "grand_total_tokens": grand_total,
@@ -450,11 +628,29 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
         return {"retry_count": state.get("retry_count", 0) + 1}
 
     # ------------------------------------------------------------------
+    # Routing after structure_scan_pass
+    # ------------------------------------------------------------------
+    def _route_after_scan(state: ExtractState) -> Literal["extract_sections_loop", "extract_structured_fields"]:
+        scan = state.get("scan_result")
+        if scan and scan.obligation_sections:
+            return "extract_sections_loop"
+        return "extract_structured_fields"
+
+    # ------------------------------------------------------------------
+    # Routing after increment_retry -- route back to same extractor path
+    # ------------------------------------------------------------------
+    def _route_retry(state: ExtractState) -> Literal["extract_sections_loop", "extract_structured_fields"]:
+        if state.get("section_partial_outputs") is not None:
+            return "extract_sections_loop"
+        return "extract_structured_fields"
+
+    # ------------------------------------------------------------------
     # Build graph
     # ------------------------------------------------------------------
     graph = StateGraph(ExtractState)
     graph.add_node("load_chunks", load_chunks)
     graph.add_node("structure_scan_pass", structure_scan_pass)
+    graph.add_node("extract_sections_loop", extract_sections_loop)
     graph.add_node("extract_structured_fields", extract_structured_fields)
     graph.add_node("validate_output", validate_output)
     graph.add_node("increment_retry", increment_retry)
@@ -469,7 +665,15 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
             "extract_structured_fields": "extract_structured_fields",
         },
     )
-    graph.add_edge("structure_scan_pass", "extract_structured_fields")
+    graph.add_conditional_edges(
+        "structure_scan_pass",
+        _route_after_scan,
+        {
+            "extract_sections_loop": "extract_sections_loop",
+            "extract_structured_fields": "extract_structured_fields",
+        },
+    )
+    graph.add_edge("extract_sections_loop", "validate_output")
     graph.add_edge("extract_structured_fields", "validate_output")
     graph.add_conditional_edges(
         "validate_output",
@@ -479,7 +683,14 @@ def build_extract_graph(llm: Any, logger: logging.Logger):
             "increment_retry": "increment_retry",
         },
     )
-    graph.add_edge("increment_retry", "extract_structured_fields")
+    graph.add_conditional_edges(
+        "increment_retry",
+        _route_retry,
+        {
+            "extract_sections_loop": "extract_sections_loop",
+            "extract_structured_fields": "extract_structured_fields",
+        },
+    )
     graph.add_edge("save_extract_artifacts", END)
 
     return graph.compile()
@@ -547,6 +758,115 @@ def _try_structured_output(llm: Any, logger: logging.Logger) -> Any | None:
     except Exception as exc:
         logger.warning("with_structured_output not available: %s", exc)
         return None
+
+
+def _try_section_structured_output(llm: Any, logger: logging.Logger) -> Any | None:
+    if not hasattr(llm, "with_structured_output"):
+        return None
+    try:
+        wrapped = llm.with_structured_output(SectionExtractOutput, include_raw=True)
+        logger.info("Section structured output enabled for %s", type(llm).__name__)
+        return wrapped
+    except Exception as exc:
+        logger.warning("with_structured_output (section) not available: %s", exc)
+        return None
+
+
+def _src_index(src_id: str) -> int:
+    try:
+        return int(src_id.split(":")[1])
+    except (IndexError, ValueError):
+        return 999999
+
+
+def _renumber_obligations(obligations: List[dict]) -> tuple:
+    """Returns (renumbered_list, old_to_new_id_map)."""
+    old_to_new: dict = {}
+    renumbered = []
+    for i, obl in enumerate(obligations, start=1):
+        new_id = f"OBL-{i:03d}"
+        old_id = obl.get("obligation_id", new_id)
+        old_to_new[old_id] = new_id
+        updated = dict(obl)
+        updated["obligation_id"] = new_id
+        renumbered.append(updated)
+    return renumbered, old_to_new
+
+
+def _merge_section_outputs(partial_outputs: List[dict], all_chunks: List[RichChunk]) -> dict:
+    """Merge per-section partial outputs into one RuleExtractorOutput-shaped dict.
+
+    partial_outputs -- list of parsed dicts, each with _is_first flag.
+    all_chunks      -- full chunk list (unused here, kept for future extension).
+    """
+    if not partial_outputs:
+        return {
+            "rule_metadata": {"rule_title": "", "release_number": None, "publication_date": None, "effective_date": None, "citations": []},
+            "rule_summary": {"summary": "", "citations": []},
+            "key_obligations": [],
+            "affected_entity_types": [],
+            "compliance_impact_areas": [],
+            "assumptions": [],
+        }
+
+    # rule_metadata and rule_summary come from the first section (full schema call)
+    first = partial_outputs[0]
+    rule_metadata = first.get("rule_metadata") or {
+        "rule_title": "", "release_number": None, "publication_date": None, "effective_date": None, "citations": []
+    }
+    rule_summary = first.get("rule_summary") or {"summary": "", "citations": []}
+
+    # Collect all obligations in section order
+    all_obligations = []
+    for p in partial_outputs:
+        all_obligations.extend(p.get("key_obligations") or [])
+
+    renumbered_obls, old_to_new = _renumber_obligations(all_obligations)
+
+    # Deduplicate affected_entity_types by entity_type
+    seen_entities: set = set()
+    merged_entities = []
+    for p in partial_outputs:
+        for ent in (p.get("affected_entity_types") or []):
+            key = ent.get("entity_type", "")
+            if key not in seen_entities:
+                seen_entities.add(key)
+                merged_entities.append(ent)
+
+    # Merge compliance_impact_areas by area, applying id renumber map
+    area_map: dict = {}
+    for p in partial_outputs:
+        for area_entry in (p.get("compliance_impact_areas") or []):
+            area = area_entry.get("area", "")
+            if area not in area_map:
+                area_map[area] = {
+                    "area": area,
+                    "linked_obligation_ids": [],
+                    "citations": [],
+                }
+            # Remap linked IDs
+            for old_id in (area_entry.get("linked_obligation_ids") or []):
+                new_id = old_to_new.get(old_id, old_id)
+                if new_id not in area_map[area]["linked_obligation_ids"]:
+                    area_map[area]["linked_obligation_ids"].append(new_id)
+            for cite in (area_entry.get("citations") or []):
+                if cite not in area_map[area]["citations"]:
+                    area_map[area]["citations"].append(cite)
+    merged_areas = list(area_map.values())
+
+    # Concatenate assumptions without dedup
+    all_assumptions = []
+    for p in partial_outputs:
+        all_assumptions.extend(p.get("assumptions") or [])
+
+    return {
+        "rule_metadata": rule_metadata,
+        "rule_summary": rule_summary,
+        "key_obligations": renumbered_obls,
+        "affected_entity_types": merged_entities,
+        "compliance_impact_areas": merged_areas,
+        "assumptions": all_assumptions,
+    }
 
 
 def _normalize_content(content: Any) -> str:

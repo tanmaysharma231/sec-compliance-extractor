@@ -24,11 +24,10 @@ _SCHEMA = {
             "obligation_text": "One specific, atomic requirement imposed by the rule (one obligation per entry -- do not merge)",
             "trigger": "event or condition that activates this obligation, or null if always active",
             "deadline": "timing requirement if stated (e.g. '4 business days', 'annual', 'within 30 days'), or null",
-            "disclosure_fields": ["specific data item required to be reported or disclosed"],
-            "evidence": ["document or record that proves this obligation was met"],
             "cited_sections": ["17 CFR 229.106", "Form 8-K Item 1.05", "Rule 13a-11(c)"],
             "source_citations": ["src:0"],
         }
+
     ],
     "affected_entity_types": [
         {
@@ -189,8 +188,15 @@ def build_extractor_prompt(payload: RuleExtractorInput, selected_chunks: List[Ri
         "- All src:<N> citations must reference chunk IDs present above\n"
         "- Do not include any text outside the JSON object\n"
         "- Do not use forbidden terms\n"
-        "- EXHAUSTIVENESS: create one obligation entry per distinct requirement found in the source\n"
-        "  chunks — do not merge separate requirements. If you find 8 requirements, produce 8 entries.\n"
+        "- ADOPTED RULES ONLY: Extract only requirements that the SEC is explicitly ADOPTING.\n"
+        "  Skip anything the text describes as proposed but not adopted, considered but rejected,\n"
+        "  or prefaced with 'we are not adopting', 'we did not propose', 'we are not requiring'.\n"
+        "- DISTINCT REQUIREMENTS: Create one obligation entry per independent top-level requirement --\n"
+        "  i.e., something a company must affirmatively do or disclose that stands on its own.\n"
+        "  Do NOT create separate entries for: safe harbors, exceptions, carve-outs, timing modifiers,\n"
+        "  or procedural consequences of another obligation (e.g. 'late filing does not affect S-3\n"
+        "  eligibility' is a modifier of the Form 8-K obligation -- put it in key_details there).\n"
+        "  Do NOT split one obligation into multiple entries just because it has several sub-elements.\n"
         "- obligation_text: write a complete, self-contained sentence that includes WHO must do WHAT,\n"
         "  by WHEN, and under WHAT condition. Example: 'Registrants must file Form 8-K disclosing a\n"
         "  material cybersecurity incident within 4 business days of determining it is material.'\n"
@@ -202,13 +208,103 @@ def build_extractor_prompt(payload: RuleExtractorInput, selected_chunks: List[Ri
         "- trigger: the event or condition that activates this obligation (e.g. 'incident determined\n"
         "  material', 'end of fiscal year', 'registrant files annual report'). null if always active.\n"
         "- deadline: the timing requirement if stated in the source (e.g. '4 business days', 'annual',\n"
-        "  'within 30 days of fiscal year end'). null if no deadline is specified.\n"
-        "- disclosure_fields: list the specific data items this obligation requires to be reported\n"
-        "  (e.g. ['nature of incident', 'scope', 'timing', 'material impact']). Empty if not a\n"
-        "  disclosure obligation.\n"
-        "- evidence: list the documents or records that would prove this obligation was met\n"
-        "  (e.g. ['Form 8-K filing', 'board meeting minutes', 'incident investigation report']).\n\n"
+        "  'within 30 days of fiscal year end'). null if no deadline is specified.\n\n"
         "Generate RuleExtractorOutput JSON now:"
+    )
+
+
+_SECTION_SCHEMA = {
+    "key_obligations": _SCHEMA["key_obligations"],
+    "affected_entity_types": _SCHEMA["affected_entity_types"],
+    "compliance_impact_areas": _SCHEMA["compliance_impact_areas"],
+    "assumptions": _SCHEMA["assumptions"],
+}
+
+
+def build_section_extractor_prompt(
+    section_heading: str,
+    section_chunks: List[RichChunk],
+    prior_obligations: List[dict],
+    summary_text: str,
+    obligation_id_start: int = 1,
+    strict_citations: bool = False,
+) -> str:
+    """Per-section extractor prompt.
+
+    section_heading      -- full heading text for this obligation section
+    section_chunks       -- RichChunk objects belonging to this section
+    prior_obligations    -- [{"obligation_id": str, "obligation_text": str}] from previous sections
+    summary_text         -- document-level summary (first 500 chars used as context)
+    obligation_id_start  -- first OBL-N number to use (avoids ID collisions)
+    strict_citations     -- whether to require citations on every obligation
+    """
+    # Document summary block (first 500 chars)
+    summary_snippet = summary_text.strip()[:500] if summary_text.strip() else "(no summary available)"
+
+    # Prior obligations block
+    if prior_obligations:
+        prior_lines = "\n".join(
+            f"  {p['obligation_id']}: {p['obligation_text'][:80]}"
+            for p in prior_obligations
+        )
+        prior_block = "OBLIGATIONS ALREADY EXTRACTED (do not re-extract):\n" + prior_lines
+    else:
+        prior_block = "OBLIGATIONS ALREADY EXTRACTED (do not re-extract):\n  (none yet -- this is the first section)"
+
+    # Source chunks block
+    source_blocks = []
+    for chunk in section_chunks:
+        section_hint = " - ".join(chunk.heading_path) if chunk.heading_path else "UNLABELED"
+        source_blocks.append(f"[{chunk.src_id}] (Section: {section_hint})\n{chunk.text}")
+    sources_text = "\n\n".join(source_blocks)
+
+    schema_json = json.dumps(_SECTION_SCHEMA, indent=2)
+
+    strict_note = (
+        "STRICT MODE: Every KeyObligation must have at least one source_citation. "
+        "Every AffectedEntityType must have a citation."
+        if strict_citations
+        else "Citations are encouraged wherever the source text supports them."
+    )
+
+    start_id = f"OBL-{obligation_id_start:03d}"
+
+    return (
+        "Extract structured compliance intelligence from one section of an SEC regulatory document.\n\n"
+        "DOCUMENT SUMMARY (overall context):\n"
+        f"{summary_snippet}\n\n"
+        f"{prior_block}\n\n"
+        f"SECTION: {section_heading}\n\n"
+        f"CITATION RULE: {strict_note}\n\n"
+        "SOURCE CHUNKS:\n"
+        f"{sources_text}\n\n"
+        "OUTPUT SCHEMA (produce exactly this structure as JSON):\n"
+        f"{schema_json}\n\n"
+        "Rules:\n"
+        f"- Start obligation numbering from {start_id} (continue sequentially from there)\n"
+        "- Do not duplicate obligations already listed in the OBLIGATIONS ALREADY EXTRACTED block\n"
+        "  IMPORTANT: an obligation that applies to a DIFFERENT entity type (e.g., foreign private\n"
+        "  issuers vs. domestic registrants, smaller reporting companies vs. large accelerated filers)\n"
+        "  is NOT a duplicate -- extract it as a separate obligation even if the content is similar.\n"
+        "- Focus exclusively on this section's content\n"
+        "- ADOPTED RULES ONLY: Extract only requirements the SEC is explicitly ADOPTING in this section.\n"
+        "  Skip anything described as proposed but not adopted, considered but rejected, or prefaced\n"
+        "  with 'we are not adopting', 'we did not propose', 'we are not requiring'.\n"
+        "- DISTINCT REQUIREMENTS: Create one obligation entry per independent top-level requirement.\n"
+        "  Do NOT create separate entries for safe harbors, exceptions, carve-outs, timing modifiers,\n"
+        "  or procedural consequences of another obligation -- put those in key_details of the parent.\n"
+        "  Do NOT split one obligation into multiple entries just because it has sub-elements.\n"
+        "- obligation_id format: OBL-001, OBL-002, ... (sequential, zero-padded)\n"
+        "- compliance_impact_areas.area must be one of the exact strings listed in the schema\n"
+        "- All src:<N> citations must reference chunk IDs present above\n"
+        "- Do not include any text outside the JSON object\n"
+        "- Do not use forbidden terms\n"
+        "- obligation_text: write a complete, self-contained sentence with WHO must do WHAT,\n"
+        "  by WHEN, and under WHAT condition.\n"
+        "- cited_sections: list the specific CFR sections or form items imposing this obligation.\n"
+        "- trigger: event or condition activating this obligation, or null if always active.\n"
+        "- deadline: timing requirement if stated, or null if none.\n\n"
+        "Generate SectionExtractOutput JSON now:"
     )
 
 
@@ -263,10 +359,6 @@ def build_gap_analysis_prompt(extracted_output: dict, company_context: str = "")
             lines.append(f"    Trigger: {obl['trigger']}")
         if obl.get("deadline"):
             lines.append(f"    Deadline: {obl['deadline']}")
-        if obl.get("disclosure_fields"):
-            lines.append(f"    Must disclose: {', '.join(obl['disclosure_fields'])}")
-        if obl.get("evidence"):
-            lines.append(f"    Evidence needed: {', '.join(obl['evidence'])}")
         if obl.get("cited_sections"):
             lines.append(f"    CFR: {', '.join(obl['cited_sections'])}")
         obl_lines.append("\n".join(lines))
@@ -387,10 +479,17 @@ def build_reference_judge_prompt(
     )
 
 
-def build_interpretation_prompt(obligation: dict, context_bundle: dict) -> str:
+def build_interpretation_prompt(
+    obligation: dict,
+    context_bundle: dict,
+    sibling_obligations: list = None,
+) -> str:
     """
     Main interpretation prompt: produces ObligationInterpretation JSON
     from obligation + assembled context bundle.
+
+    sibling_obligations: list of {obligation_id, obligation_text} dicts for all
+    other obligations in the same run, so the LLM can express parent relationships.
     """
     import json as _json
 
@@ -404,9 +503,24 @@ def build_interpretation_prompt(obligation: dict, context_bundle: dict) -> str:
         defs = context_bundle["definitions"]
         definitions_block = "DEFINITIONS FROM DOCUMENT:\n" + "\n---\n".join(defs) + "\n\n"
 
-    surrounding_block = ""
-    if context_bundle.get("surrounding"):
-        surrounding_block = "SURROUNDING CONTEXT:\n" + "\n---\n".join(context_bundle["surrounding"]) + "\n\n"
+    anchor_context_block = ""
+    if context_bundle.get("anchor_context"):
+        anchor_context_block = (
+            "ANCHOR CONTEXT (source text this obligation was extracted from):\n"
+            + "\n---\n".join(context_bundle["anchor_context"])
+            + "\n\n"
+        )
+
+    lookup_results_block = ""
+    if context_bundle.get("lookup_results"):
+        parts = []
+        for term, passages in context_bundle["lookup_results"].items():
+            parts.append(f"[Lookup: {term}]\n" + "\n---\n".join(passages))
+        lookup_results_block = (
+            "TERM LOOKUP RESULTS (document passages retrieved for requested terms):\n"
+            + "\n---\n".join(parts)
+            + "\n\n"
+        )
 
     cfr_block = ""
     if context_bundle.get("cfr_texts"):
@@ -417,17 +531,39 @@ def build_interpretation_prompt(obligation: dict, context_bundle: dict) -> str:
 
     discussion_block = ""
     if context_bundle.get("discussion"):
-        discussion_block = "DISCUSSION CONTEXT (SEC commentary and public comments):\n" + "\n---\n".join(context_bundle["discussion"]) + "\n\n"
+        discussion_block = "BIN FINDINGS (scope modifiers, definitions, edge cases):\n" + "\n---\n".join(context_bundle["discussion"]) + "\n\n"
+
+    siblings_block = ""
+    if sibling_obligations:
+        lines = [
+            f"  {s['obligation_id']}: {s['obligation_text'][:100]}"
+            for s in sibling_obligations
+            if s.get("obligation_id") != obligation.get("obligation_id")
+        ]
+        if lines:
+            siblings_block = (
+                "OTHER OBLIGATIONS IN THIS RULE (for relationship context only):\n"
+                + "\n".join(lines)
+                + "\n\n"
+            )
 
     schema_hint = _json.dumps(
         {
             "obligation_id": obligation.get("obligation_id", "OBL-001"),
             "primary_interpretation": "What this obligation most likely means in practice",
+            "key_details": [
+                "Each notable exception, carve-out, or safe harbor that modifies the main rule",
+                "Scope extensions (e.g. applies to third-party systems, not just registrant-owned)",
+                "Procedural details that affect when/how the obligation applies",
+            ],
             "supporting_sections": ["CFR section or definition used to reach this interpretation"],
             "alternative_interpretations": ["Another plausible reading if law is ambiguous"],
             "ambiguous_terms": ["term that is unclear or context-dependent"],
             "compliance_implication": "Concrete action the company needs to take",
             "confidence_level": "high | medium | low",
+            "needs_more_context": False,
+            "lookup_requests": [],
+            "parent_obligation_ids": [],
         },
         indent=2,
     )
@@ -439,13 +575,23 @@ def build_interpretation_prompt(obligation: dict, context_bundle: dict) -> str:
         f"Deadline: {deadline}\n"
         f"CFR References: {cited}\n\n"
         f"{definitions_block}"
-        f"{surrounding_block}"
+        f"{anchor_context_block}"
+        f"{lookup_results_block}"
         f"{cfr_block}"
         f"{discussion_block}"
+        f"{siblings_block}"
         "Produce a structured interpretation using the schema below.\n\n"
         "Rules:\n"
-        "- primary_interpretation: what this obligation most likely means in practice,\n"
-        "  grounded in the definitions and CFR text provided\n"
+        "- primary_interpretation: what this obligation most likely means in practice.\n"
+        "  If lookup results were provided, ground your interpretation in those passages.\n"
+        "  Reference specific SEC reasoning -- do not just restate the obligation text.\n"
+        "- key_details: a list of every important nuance visible in the anchor context,\n"
+        "  including: exceptions and carve-outs (e.g. national security delay), scope\n"
+        "  extensions (e.g. applies to third-party systems), safe harbors (e.g. no\n"
+        "  technical detail required), procedural rules (e.g. staged delay extensions),\n"
+        "  and eligibility effects (e.g. late filing does not affect shelf registration).\n"
+        "  Each item should be one concrete, specific statement. Do not leave this empty\n"
+        "  if the anchor context contains any such details.\n"
         "- alternative_interpretations: list other plausible readings where the law is\n"
         "  genuinely ambiguous -- do not give one definitive answer where uncertainty exists\n"
         "- ambiguous_terms: list terms in the obligation text that are legally unclear\n"
@@ -456,11 +602,19 @@ def build_interpretation_prompt(obligation: dict, context_bundle: dict) -> str:
         "  (3) the operational challenge (time pressure, facts still unfolding,\n"
         "      coordination across functions).\n"
         "  Use precise legal language from the rule -- do not paraphrase.\n"
-        "  If the discussion context contains a worked example or timeline, reference it\n"
-        "  to make the implication concrete.\n"
+        "  If any context contains a worked example or timeline, reference it.\n"
         "- confidence_level: high if the rule is clear, medium if some ambiguity,\n"
         "  low if significant uncertainty or competing interpretations\n"
         "- supporting_sections: name the CFR sections or definitions you relied on\n"
+        "- lookup_requests: list terms you want to search for in the document to resolve\n"
+        "  genuine legal ambiguity (e.g. 'material', 'unreasonable delay'). Only list terms\n"
+        "  that are unclear from the anchor context above. Leave [] if context is sufficient.\n"
+        "  Do NOT request lookups if lookup results are already provided above.\n"
+        "- needs_more_context: set true only if the proposed rule background would\n"
+        "  materially change the interpretation even after any lookup results\n"
+        "- parent_obligation_ids: if this obligation is a special case, exception, or\n"
+        "  sub-requirement of another obligation listed above, include those obligation IDs.\n"
+        "  Leave [] if this is a standalone requirement.\n"
         "- Do not use forbidden terms: compliant, non-compliant, violation, illegal,\n"
         "  penalty exposure, must fix\n"
         "- Output JSON only, no markdown fences\n\n"

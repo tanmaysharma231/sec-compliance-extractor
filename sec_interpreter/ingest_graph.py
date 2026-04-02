@@ -254,16 +254,22 @@ def build_ingest_graph():
 # ---------------------------------------------------------------------------
 
 def _derive_subsection_role(heading_path: list) -> str:
-    """Derive subsection role from heading_path[2] naming patterns."""
+    """Derive subsection role from heading_path leaf-level naming patterns.
+
+    Checks from the deepest heading upward so that sections with extra nesting
+    levels (e.g. 'C. Governance > 1. Risk Management > c. Final Amendments')
+    are classified correctly instead of falling through to 'other'.
+    """
     if len(heading_path) < 3:
         return "other"
-    level3 = heading_path[2].lower()
-    if "proposed" in level3:
-        return "proposed"
-    if "comment" in level3:
-        return "comments"
-    if "final" in level3:
-        return "final"
+    for level in reversed(heading_path[2:]):
+        lower = level.lower()
+        if "proposed" in lower:
+            return "proposed"
+        if "comment" in lower:
+            return "comments"
+        if "final" in lower:
+            return "final"
     return "other"
 
 

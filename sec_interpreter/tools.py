@@ -205,6 +205,61 @@ def get_section_family_chunks(
     return results
 
 
+def search_chunks_for_term(
+    term: str,
+    artifact_dir: str,
+    top_n: int = 5,
+) -> List[dict]:
+    """
+    Keyword search over chunks.json for a term. No classify dependency.
+
+    Scoring per chunk:
+      hit_count  = word-boundary occurrences of term in chunk text
+      bonus +2   if has_definitions=True
+      bonus +1   if has_example=True
+
+    Returns top_n chunks sorted by score as dicts with keys: src_id, heading, text.
+    Returns [] if chunks.json is missing or no matches found.
+    """
+    chunks_path = os.path.join(artifact_dir, "chunks.json")
+    if not os.path.exists(chunks_path):
+        logger.debug("search_chunks_for_term: no chunks.json in %s", artifact_dir)
+        return []
+
+    with open(chunks_path, encoding="utf-8") as f:
+        raw_chunks = json.load(f)
+
+    pattern = re.compile(r"\b" + re.escape(term.lower()) + r"\b")
+    scored = []
+    for c in raw_chunks:
+        text = c.get("text", "")
+        hit_count = len(pattern.findall(text.lower()))
+        if hit_count == 0:
+            continue
+        score = hit_count
+        if c.get("has_definitions"):
+            score += 2
+        if c.get("has_example"):
+            score += 1
+        scored.append((score, c))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    results = [
+        {
+            "src_id": c.get("src_id", ""),
+            "heading": " > ".join(c.get("heading_path", [])),
+            "text": c.get("text", ""),
+        }
+        for _, c in scored[:top_n]
+    ]
+
+    logger.info(
+        "search_chunks_for_term(%r): %d candidates, %d returned",
+        term, len(scored), len(results),
+    )
+    return results
+
+
 def search_document(
     query: str,
     artifact_dir: str,
