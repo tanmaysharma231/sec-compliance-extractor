@@ -7,7 +7,7 @@ per-obligation interpretations with cited source passages.
 Built to handle the full complexity of real SEC releases (100-300 pages, 150-200 chunks).
 Uses document heading structure -- not keyword search or embeddings -- to identify
 extraction targets. Verified on SEC Release 33-11216 (Cybersecurity Disclosure Rule, 2023).
-Achieves 94.7% criterion coverage on 38 reference evaluation criteria.
+Achieves 97.0% criterion coverage on 38 reference evaluation criteria.
 
 ---
 
